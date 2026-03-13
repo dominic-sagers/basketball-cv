@@ -1,0 +1,37 @@
+cameras:
+  - index: 0
+    name: "basket_1"
+    resolution: [1920, 1080]
+    fps: 30
+  - index: 1
+    name: "basket_2"
+    resolution: [1920, 1080]
+    fps: 30
+
+model:
+  weights: "yolo11m.pt"
+  device: 0
+  confidence: 0.4
+  iou_threshold: 0.5
+  input_size: 1280
+
+tracking:
+  tracker: "bytetrack"
+  track_high_thresh: 0.25
+  track_low_thresh: 0.1
+  track_buffer: 30
+
+court:
+  width_ft: 94
+  height_ft: 50
+  homography_points: []
+
+event_logic:
+  rebound_proximity_px: 80
+  shot_downward_frames: 3
+  assist_possession_window: 5
+  block_hand_ball_dist_px: 40
+
+output:
+  log_dir: "output/"
+  scoreboard_display: 1

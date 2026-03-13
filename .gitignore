@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# Model weights (download separately)
+weights/
+*.pt
+*.onnx
+
+# Output / game logs
+output/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# CUDA / torch cache
+.cache/
