@@ -1,0 +1,75 @@
+version: '3.8'
+
+services:
+  basketball-cv:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: basketball-cv:latest
+    container_name: basketball-cv
+
+    # GPU access - requires NVIDIA Container Toolkit
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+    # Environment variables
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - PYTHONUNBUFFERED=1
+
+    # Volume mounts
+    volumes:
+      # Mount source code for development (comment out for production)
+      - ./src:/app/src
+      - ./config.yaml:/app/config.yaml
+
+      # Mount output directory to persist logs and stats
+      - ./output:/app/output
+
+      # Mount weights directory for custom trained models
+      - ./weights:/app/weights
+
+      # Camera access on Linux (adjust for your camera devices)
+      # Uncomment if using USB cameras
+      # - /dev/video0:/dev/video0
+      # - /dev/video1:/dev/video1
+
+    # Device access for cameras (Linux)
+    # Uncomment and adjust based on your camera setup
+    # devices:
+    #   - /dev/video0:/dev/video0
+    #   - /dev/video1:/dev/video1
+
+    # Network mode for camera access (alternative approach)
+    # Use host network if cameras are accessed via RTSP/network streams
+    # network_mode: "host"
+
+    # Enable X11 forwarding for OpenCV windows (Linux only)
+    # environment:
+    #   - DISPLAY=${DISPLAY}
+    # volumes:
+    #   - /tmp/.X11-unix:/tmp/.X11-unix
+
+    # Keep container running for interactive development
+    stdin_open: true
+    tty: true
+
+    # Override default command (optional)
+    # command: python3.11 src/camera_test.py
+
+    # Restart policy
+    restart: unless-stopped
+
+# Optional: Add a service for future web dashboard or API
+#  api:
+#    build:
+#      context: .
+#      dockerfile: Dockerfile
+#    ports:
+#      - "8000:8000"
+#    command: python3.11 src/api.py

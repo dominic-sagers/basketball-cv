@@ -1,37 +1,100 @@
-cameras:
-  - index: 0
-    name: "basket_1"
-    resolution: [1920, 1080]
-    fps: 30
-  - index: 1
-    name: "basket_2"
-    resolution: [1920, 1080]
-    fps: 30
+# basketball-cv configuration
+# All tunable parameters live here — never hardcoded in source files.
+# See docs/architecture.md for full field descriptions.
 
+# ---------------------------------------------------------------------------
+# Video sources
+# Each entry is one camera/stream. Supported types: "file", "rtsp", "usb"
+#
+# file  → pre-recorded video for development/testing
+# rtsp  → live network stream (RTSP URL)
+# usb   → locally attached USB or built-in camera
+# ---------------------------------------------------------------------------
+sources:
+  - name: "basket_1"
+    type: "file"
+    path: "test_footage/basket_1.mp4"
+    loop: true             # loop file for repeated testing
+    team: "A"              # team this camera covers
+
+  - name: "basket_2"
+    type: "file"
+    path: "test_footage/basket_2.mp4"
+    loop: true
+    team: "B"
+
+# RTSP example (swap in when cameras are live):
+#   - name: "basket_1"
+#     type: "rtsp"
+#     url: "rtsp://192.168.1.100:554/stream1"
+#     reconnect_delay: 3.0    # seconds between reconnect attempts
+#     connect_timeout: 10.0   # seconds to wait for initial connection
+#     team: "A"
+#
+#   - name: "basket_2"
+#     type: "rtsp"
+#     url: "rtsp://192.168.1.101:554/stream1"
+#     reconnect_delay: 3.0
+#     connect_timeout: 10.0
+#     team: "B"
+
+# USB example:
+#   - name: "basket_1"
+#     type: "usb"
+#     index: 0
+#     resolution: [1920, 1080]
+#     fps: 30
+#     team: "A"
+
+# ---------------------------------------------------------------------------
+# Detection model
+# ---------------------------------------------------------------------------
 model:
-  weights: "yolo11m.pt"
-  device: 0
+  weights: "yolo11m.pt"        # base weights; swap for fine-tuned basketball weights
+  device: 0                    # GPU index (0 = first GPU); "cpu" for CPU-only
   confidence: 0.4
   iou_threshold: 0.5
-  input_size: 1280
+  input_size: 1280             # px — larger = more accurate but slower
+  # class_map: COCO class IDs to keep. Defaults shown below.
+  # Override when using a fine-tuned model with different class indices.
+  class_map:
+    0:  "person"
+    32: "sports ball"
+  # Fine-tuned model example (hoop as class 2):
+  # class_map:
+  #   0: "person"
+  #   1: "sports ball"
+  #   2: "hoop"
 
+# ---------------------------------------------------------------------------
+# Multi-object tracking (ByteTrack)
+# ---------------------------------------------------------------------------
 tracking:
   tracker: "bytetrack"
   track_high_thresh: 0.25
   track_low_thresh: 0.1
-  track_buffer: 30
+  track_buffer: 30             # frames to keep a lost track alive
 
+# ---------------------------------------------------------------------------
+# Court geometry
+# ---------------------------------------------------------------------------
 court:
   width_ft: 94
   height_ft: 50
-  homography_points: []
+  homography_points: []        # filled after camera calibration
 
+# ---------------------------------------------------------------------------
+# Event detection thresholds (all tunable without touching source code)
+# ---------------------------------------------------------------------------
 event_logic:
-  rebound_proximity_px: 80
-  shot_downward_frames: 3
-  assist_possession_window: 5
-  block_hand_ball_dist_px: 40
+  rebound_proximity_px: 80     # player must be within this radius at possession change
+  shot_downward_frames: 3      # frames ball must travel downward through hoop zone
+  assist_possession_window: 5  # seconds — look-back window for last pass
+  block_hand_ball_dist_px: 40  # max hand-to-ball distance to count as a block
 
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
 output:
   log_dir: "output/"
-  scoreboard_display: 1
+  scoreboard_display: 1        # monitor index for Phase 1.5 scoreboard overlay

@@ -1,0 +1,25 @@
+# Basketball CV - Real-time stat tracking system
+# Python 3.11+ required
+
+# Core computer vision and ML
+ultralytics>=8.0.0        # YOLOv11, ByteTrack, pose estimation
+opencv-python>=4.8.0      # Camera capture, preprocessing, homography
+numpy>=1.24.0             # Array operations
+
+# Note: PyTorch + CUDA installed separately via:
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+
+# Configuration and logging
+pyyaml>=6.0              # config.yaml parsing
+
+# Data handling and export (Phase 2)
+pandas>=2.0.0            # Stat aggregation and export
+openpyxl>=3.1.0          # Excel export
+
+# Scoreboard UI (Phase 1.5)
+pygame>=2.5.0            # Real-time overlay rendering
+
+# Optional dependencies (uncomment if needed)
+# roboflow                # Access to basketball datasets for fine-tuning (not needed at runtime)
+# matplotlib>=3.7.0       # Charts in Excel export
+# pillow>=10.0.0          # Image manipulation (included with ultralytics)

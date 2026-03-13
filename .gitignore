@@ -12,6 +12,12 @@ weights/
 # Output / game logs
 output/
 
+# Test footage (video files are large, share separately)
+test_footage/*.mp4
+test_footage/*.avi
+test_footage/*.mov
+test_footage/*.mkv
+
 # IDE
 .vscode/
 .idea/
@@ -22,3 +28,8 @@ Thumbs.db
 
 # CUDA / torch cache
 .cache/
+
+# Docker volumes
+volumes/
+
+CLAUDE.md

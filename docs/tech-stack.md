@@ -55,14 +55,23 @@ pip install pygame
 - Use if YOLOv11-pose accuracy is insufficient for block/action detection
 - Repo: https://github.com/MVIG-SJTU/AlphaPose
 
+### RF-DETR (alternative detection backbone)
+```
+pip install rfdetr
+```
+- Roboflow's real-time detection transformer (released March 2025, Apache 2.0 for N/S/M/L sizes)
+- DINOv2 vision transformer backbone — handles player occlusion better than CNN-based YOLO
+- Trade-off: ~20-25 FPS on T4 GPU at high accuracy; RTX 4080 Super is significantly faster
+- Not yet integrated — evaluate against test footage if ByteTrack loses tracks during screens
+- GitHub: https://github.com/roboflow/rf-detr
+- See `docs/models.md` for detailed comparison vs. YOLOv11
+
 ### Roboflow
 ```
 pip install roboflow
 ```
 - Access to basketball-specific pretrained datasets for fine-tuning
-- Key datasets to look at on Roboflow Universe:
-  - "basketball-players" detection datasets
-  - "basketball" ball detection
+- See `docs/models.md` for the full dataset list with URLs and download instructions
 - Only needed if you fine-tune; not required at runtime
 
 ### OBS Studio (Phase 1.5, not a Python dep)
@@ -125,34 +134,35 @@ python -c "from ultralytics import YOLO; YOLO('yolo11m.pt')"
 # 5. Verify CUDA
 python -c "import torch; print(torch.cuda.get_device_name(0))"
 
-# 6. Run camera test
-python src/camera_test.py
-
-# 7. Run inference benchmark
-python src/detection_test.py
+# 6. Verify sources and pipeline
+python src/source_test.py --file test_footage/your_clip.mp4
+python src/pipeline_test.py --file test_footage/your_clip.mp4
 ```
 
 ---
 
 ## config.yaml structure (reference)
 
+The actual `config.yaml` at the project root is the authoritative reference.
+Key top-level sections:
+
 ```yaml
-cameras:
-  - index: 0           # or "rtsp://..." for IP cameras
-    name: "basket_1"
-    resolution: [1920, 1080]
-    fps: 30
-  - index: 1
-    name: "basket_2"
-    resolution: [1920, 1080]
-    fps: 30
+sources:
+  - name: "basket_1"
+    type: "file"          # "file" | "rtsp" | "usb"
+    path: "test_footage/basket_1.mp4"
+    loop: true
+    team: "A"
 
 model:
-  weights: "weights/yolo11m-basketball.pt"  # fine-tuned, or yolo11m.pt for base
-  device: 0            # GPU index (0 = first GPU)
+  weights: "yolo11m.pt"   # or "weights/your_finetuned.pt"
+  device: 0               # GPU index; "cpu" for testing without GPU
   confidence: 0.4
   iou_threshold: 0.5
-  input_size: 1280     # px — larger = more accurate, slower
+  input_size: 1280
+  class_map:
+    0:  "person"
+    32: "sports ball"     # extend with hoop class once fine-tuned
 
 tracking:
   tracker: "bytetrack"
@@ -160,18 +170,13 @@ tracking:
   track_low_thresh: 0.1
   track_buffer: 30
 
-court:
-  width_ft: 94
-  height_ft: 50
-  homography_points: []  # set after calibration
-
 event_logic:
-  rebound_proximity_px: 80     # how close a player must be to ball at possession change
-  shot_downward_frames: 3      # frames ball must travel downward through hoop zone
-  assist_possession_window: 5  # seconds — look back window for last pass
-  block_hand_ball_dist_px: 40  # max hand-to-ball distance to count as block
+  rebound_proximity_px: 80
+  shot_downward_frames: 3
+  assist_possession_window: 5
+  block_hand_ball_dist_px: 40
 
 output:
   log_dir: "output/"
-  scoreboard_display: 1        # monitor index for scoreboard
+  scoreboard_display: 1
 ```

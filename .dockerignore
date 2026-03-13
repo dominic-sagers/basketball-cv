@@ -1,0 +1,65 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Output files
+output/*
+!output/.gitkeep
+
+# Weights (large files - download separately or mount as volume)
+weights/*
+!weights/.gitkeep
+*.pt
+*.pth
+*.onnx
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Documentation (already in image if needed)
+docs/
+
+# Test footage/data
+test_data/
+test_footage/
+*.mp4
+*.avi
+*.mov
+
+# Temporary files
+*.tmp
+*.bak
