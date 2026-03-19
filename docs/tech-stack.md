@@ -26,7 +26,7 @@ pip install opencv-python
 
 ### PyTorch + CUDA
 ```
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 ```
 - CUDA 12.1 build for RTX 4080 Super
 - Verify with: `torch.cuda.is_available()` and `torch.cuda.get_device_name(0)`
@@ -126,7 +126,7 @@ source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install ultralytics opencv-python pandas openpyxl pygame pyyaml
 
 # 3. Install PyTorch with CUDA 12.1
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 
 # 4. Download base model weights (cached locally after first run)
 python -c "from ultralytics import YOLO; YOLO('yolo11m.pt')"

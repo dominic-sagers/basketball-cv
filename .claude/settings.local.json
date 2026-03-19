@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "WebSearch"
+      "WebSearch",
+      "Bash(ls -la f:/personal_repos/basketball-cv/swishai_tmp/BE/*/)"
     ]
   }
 }

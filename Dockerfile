@@ -2,8 +2,8 @@
 # CUDA-enabled Docker image for YOLOv11 + ByteTrack inference
 
 # Use NVIDIA CUDA base image with Python 3.11
-# Using Ubuntu 22.04 with CUDA 12.1 for RTX 4080 Super compatibility
-FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
+# Using Ubuntu 22.04 with CUDA 12.4 for RTX 4080 Super + Python 3.13 compatibility
+FROM nvidia/cuda:12.4.0-cudnn9-runtime-ubuntu22.04
 
 # Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
@@ -34,7 +34,7 @@ COPY requirements.txt .
 
 # Install Python dependencies
 # PyTorch with CUDA 12.1 support
-RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 
 # Install other dependencies
 RUN pip install --no-cache-dir -r requirements.txt

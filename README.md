@@ -21,17 +21,22 @@ Runs locally on an RTX 4080 Super (16GB VRAM). No cloud, no internet dependency 
 ## Current state (Phase 1 — in progress)
 
 ### Done
-- [x] Video source abstraction: file, RTSP, and USB camera inputs via unified interface
-- [x] YOLOv11 detection wrapper (`detector.py`)
-- [x] ByteTrack multi-object tracking wrapper (`tracker.py`)
-- [x] Real-time visualizer: bounding boxes, track IDs, ball trajectory trail, FPS panel (`visualizer.py`)
-- [x] Pipeline test harness: source → detect/track → visualize with save-to-file support (`pipeline_test.py`)
-- [x] Docker setup with CUDA 12.1 support (GPU passthrough, camera mounts)
-- [x] Config-driven — all thresholds, paths, and camera settings in `config.yaml`
+- [x] `video_source.py` — file / RTSP (threaded, auto-reconnect) / USB camera abstraction
+- [x] `source_test.py` — verify any source opens and delivers frames at target FPS
+- [x] `detector.py` — YOLOv11 wrapper, returns typed `Detection` objects
+- [x] `tracker.py` — ByteTrack via `model.track(persist=True)`, returns typed `Track` objects
+- [x] `visualizer.py` — bounding boxes, track IDs, fading ball trajectory trail, FPS info panel
+- [x] `pipeline_test.py` — source → detect/track → visualize, `--save-output` and `--save-log` for offline analysis
+- [x] Docker setup with CUDA 12.4 support (GPU passthrough, camera mounts)
+- [x] `config.yaml` — all thresholds, source types, and paths; never hardcoded in source
+- [x] Test footage recorded at gym-approximated angles (`test_footage/basketballcv-sample-1.mov`)
+- [x] Base model benchmarked: 14.8% ball detection rate, 48.5 FPS at imgsz=960 with `yolo11m.pt`
+- [x] Basketball-specific dataset downloaded (9,599 images, 5 classes incl. Ball_in_Basket, Basket)
+- [x] Fine-tuning pipeline in place — see `docs/training.md`
 
 ### In progress
-- [ ] Capturing test footage at gym angles for iterating on detection quality
-- [ ] Evaluating pretrained basketball weights (see `docs/models.md`)
+- [ ] Fine-tuning `yolo11m` on basketball dataset (`Basketball-detection-1/`)
+- [ ] Target: ≥50% ball detection rate (up from 14.8% baseline)
 
 ### Up next
 - [ ] `preprocessor.py` — court ROI crop, resize, denoise
@@ -50,7 +55,7 @@ See [`docs/roadmap.md`](docs/roadmap.md) for the full phase breakdown.
 basketball-cv/
 ├── config.yaml              # all tunable parameters — start here
 ├── requirements.txt
-├── Dockerfile               # CUDA 12.1 + Python 3.11
+├── Dockerfile               # CUDA 12.4 + Python 3.13
 ├── docker-compose.yml
 │
 ├── src/
@@ -64,15 +69,17 @@ basketball-cv/
 │   ├── camera_test.py       # scan USB camera indices
 │   └── detection_test.py    # CUDA check + YOLOv11 FPS benchmark
 │
-├── test_footage/            # drop .mp4 files here (gitignored)
-├── weights/                 # custom fine-tuned .pt files (gitignored)
-├── output/                  # game logs, annotated clips (gitignored)
+├── test_footage/            # drop video files here (gitignored)
+├── weights/                 # fine-tuned .pt files + training runs (gitignored)
+├── output/                  # annotated clips, game logs, frame logs (gitignored)
+├── Basketball-detection-1/  # Roboflow dataset — 9,599 images, 5 classes (gitignored)
 │
 └── docs/
     ├── roadmap.md           # phase-by-phase feature plan
     ├── architecture.md      # pipeline diagram and module breakdown
     ├── tech-stack.md        # dependency rationale and setup
-    ├── models.md            # pretrained basketball model options
+    ├── models.md            # model options, Roboflow datasets, evaluation results
+    ├── training.md          # how to download dataset and run fine-tuning
     └── docker.md            # Docker setup and camera passthrough guide
 ```
 
@@ -86,7 +93,7 @@ basketball-cv/
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
 ```
 
@@ -119,6 +126,9 @@ python src/pipeline_test.py --file test_footage/clip.mp4 --playback-speed 0.25
 
 # Save annotated output clip
 python src/pipeline_test.py --file test_footage/clip.mp4 --save-output output/annotated.mp4
+
+# Save per-frame detection log as JSON for offline analysis
+python src/pipeline_test.py --file test_footage/clip.mp4 --no-preview --save-log output/log.json
 
 # Headless (no window — Docker or SSH)
 python src/pipeline_test.py --file test_footage/clip.mp4 --no-preview
@@ -164,7 +174,12 @@ Switch between types by editing `config.yaml` — no code changes needed.
 
 ## Model weights
 
-The base `yolo11m.pt` model (auto-downloaded on first run) detects `person` and `sports ball` from COCO. For better basketball accuracy, see [`docs/models.md`](docs/models.md) for pretrained basketball-specific weights and Roboflow Universe datasets.
+The base `yolo11m.pt` (COCO) is used by default and auto-downloads on first run. A fine-tuned basketball model is in training — see [`docs/training.md`](docs/training.md) for how to reproduce it.
+
+| Model | Ball detection | FPS (imgsz=960) | Classes |
+|---|---|---|---|
+| `yolo11m.pt` (COCO baseline) | 14.8% | 48.5 | person, sports ball |
+| `basketball-ft/best.pt` (fine-tuned) | TBD | ~48 | Ball, Ball_in_Basket, Player, Basket, Player_Shooting |
 
 ---
 
@@ -187,5 +202,6 @@ The base `yolo11m.pt` model (auto-downloaded on first run) detects `person` and 
 | [`docs/roadmap.md`](docs/roadmap.md) | Feature phases and completion criteria |
 | [`docs/architecture.md`](docs/architecture.md) | Pipeline diagram and module responsibilities |
 | [`docs/tech-stack.md`](docs/tech-stack.md) | Dependency rationale, setup steps |
-| [`docs/models.md`](docs/models.md) | Pretrained basketball model options and download guide |
+| [`docs/models.md`](docs/models.md) | Model options, Roboflow datasets, evaluation results |
+| [`docs/training.md`](docs/training.md) | Dataset download, fine-tuning, resuming training |
 | [`docs/docker.md`](docs/docker.md) | Docker setup, GPU access, camera passthrough |

@@ -4,10 +4,14 @@ __pycache__/
 .venv/
 *.egg-info/
 
-# Model weights (download separately)
+# Model weights and training runs (large binary files)
 weights/
 *.pt
 *.onnx
+runs/
+
+# Roboflow datasets (download via docs/training.md)
+Basketball-detection-1/
 
 # Output / game logs
 output/

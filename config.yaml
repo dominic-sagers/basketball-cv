@@ -52,9 +52,9 @@ sources:
 model:
   weights: "yolo11m.pt"        # base weights; swap for fine-tuned basketball weights
   device: 0                    # GPU index (0 = first GPU); "cpu" for CPU-only
-  confidence: 0.4
+  confidence: 0.4              # 0.25 tested — no improvement (small input size is the bottleneck, not threshold)
   iou_threshold: 0.5
-  input_size: 1280             # px — larger = more accurate but slower
+  input_size: 960              # 1280 → ~26 FPS, 960 → ~35 FPS on RTX 4080S (revert if ball misses increase)
   # class_map: COCO class IDs to keep. Defaults shown below.
   # Override when using a fine-tuned model with different class indices.
   class_map:

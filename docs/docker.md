@@ -204,7 +204,7 @@ Required for type hints and performance improvements in this project.
 
 ### PyTorch CUDA build
 ```dockerfile
-RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 ```
 Matches CUDA 12.1 runtime for RTX 4080 Super.
 

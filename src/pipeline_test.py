@@ -34,9 +34,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import cv2
@@ -69,6 +71,7 @@ def run_pipeline(
     *,
     show_preview: bool = True,
     save_path: str | None = None,
+    log_path: str | None = None,
     playback_speed: float = 1.0,
     detect_only: bool = False,
 ) -> dict:
@@ -83,6 +86,7 @@ def run_pipeline(
         tracker:        Tracker instance (used when detect_only=False)
         show_preview:   Show an OpenCV window
         save_path:      If set, write annotated frames to this video file
+        log_path:       If set, write per-frame detection/tracking data to this JSON file
         playback_speed: Slow down (0.5 = half speed) for frame-by-frame inspection
         detect_only:    Skip tracking — raw detections only (faster, less info)
     """
@@ -92,6 +96,7 @@ def run_pipeline(
 
     viz = Visualizer()
     writer: cv2.VideoWriter | None = None
+    frame_log: list[dict] = []
     frame_number = 0
     t_start = time.perf_counter()
     fps_times: list[float] = []
@@ -123,6 +128,38 @@ def run_pipeline(
             if elapsed > 0:
                 fps_times.append(1.0 / elapsed)
             recent_fps = sum(fps_times[-30:]) / len(fps_times[-30:]) if fps_times else 0.0
+
+            # ── Frame log entry ────────────────────────────────────────
+            if log_path:
+                entry: dict = {
+                    "frame": frame_number,
+                    "timestamp_s": round(frame_number / source.fps, 3) if source.fps else None,
+                    "inference_ms": round(elapsed * 1000, 1),
+                    "ball_detected": False,
+                    "objects": [],
+                }
+                if tracks:
+                    for t in tracks:
+                        entry["objects"].append({
+                            "track_id": t.track_id,
+                            "class": t.class_name,
+                            "conf": round(t.confidence, 3),
+                            "bbox": list(t.bbox),
+                            "center": list(t.center),
+                        })
+                        if t.class_name == "sports ball":
+                            entry["ball_detected"] = True
+                elif detections:
+                    for d in detections:
+                        entry["objects"].append({
+                            "class": d.class_name,
+                            "conf": round(d.confidence, 3),
+                            "bbox": list(d.bbox),
+                            "center": list(d.center),
+                        })
+                        if d.class_name == "sports ball":
+                            entry["ball_detected"] = True
+                frame_log.append(entry)
 
             # ── Visualise ──────────────────────────────────────────────
             annotated = viz.draw(
@@ -166,6 +203,25 @@ def run_pipeline(
         cv2.destroyAllWindows()
         if writer is not None:
             writer.release()
+        if log_path and frame_log:
+            Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+            ball_frames = sum(1 for e in frame_log if e["ball_detected"])
+            summary = {
+                "source": source.name,
+                "model": "yolo11m.pt",
+                "recorded_at": datetime.now().isoformat(timespec="seconds"),
+                "total_frames": frame_number,
+                "source_fps": source.fps,
+                "ball_detected_frames": ball_frames,
+                "ball_detection_rate_pct": round(100 * ball_frames / frame_number, 1) if frame_number else 0,
+                "avg_inference_ms": round(sum(e["inference_ms"] for e in frame_log) / len(frame_log), 1),
+                "frames": frame_log,
+            }
+            with open(log_path, "w") as f:
+                json.dump(summary, f, indent=2)
+            logger.info("Frame log saved to %s  (ball detected in %d/%d frames = %.1f%%)",
+                        log_path, ball_frames, frame_number,
+                        100 * ball_frames / frame_number if frame_number else 0)
 
     total_time = time.perf_counter() - t_start
     avg_fps = frame_number / total_time if total_time > 0 else 0.0
@@ -197,6 +253,8 @@ def main() -> None:
                         help="Disable OpenCV window (headless mode)")
     parser.add_argument("--save-output", metavar="PATH", default=None,
                         help="Save annotated video to this file path")
+    parser.add_argument("--save-log", metavar="PATH", default=None,
+                        help="Save per-frame detection/tracking data to a JSON file")
     parser.add_argument("--playback-speed", type=float, default=1.0, metavar="X",
                         help="Playback speed multiplier for file sources (0.25 = quarter speed)")
 
@@ -265,12 +323,18 @@ def main() -> None:
             p = Path(save_path)
             save_path = str(p.with_stem(f"{p.stem}_{source.name}"))
 
+        log_path = args.save_log
+        if log_path and len(sources) > 1:
+            p = Path(log_path)
+            log_path = str(p.with_stem(f"{p.stem}_{source.name}"))
+
         run_pipeline(
             source=source,
             detector=detector,
             tracker=tracker,
             show_preview=show_preview,
             save_path=save_path,
+            log_path=log_path,
             playback_speed=args.playback_speed,
             detect_only=detect_only,
         )
