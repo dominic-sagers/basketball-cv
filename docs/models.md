@@ -88,7 +88,7 @@ without requiring a Roboflow paid plan.
 To use in this pipeline, download `best.pt` and update `config.yaml`:
 ```yaml
 model:
-  weights: "weights/swishai_best.pt"
+  weights: "store/weights/swishai_best.pt"
   class_map:
     0: "Ball"
     1: "Ball in Basket"
@@ -196,7 +196,7 @@ yolo detect train \
   device=0
 ```
 
-5. Put the resulting `best.pt` in `weights/` and update `config.yaml`
+5. Put the resulting `best.pt` in `store/weights/` and update `config.yaml`
 
 Even 200-300 labeled frames from your gym will meaningfully improve detection
 quality for your specific setup.

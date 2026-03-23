@@ -46,7 +46,7 @@ model what a basketball looks like from gym camera angles.
 | 3 | Basket | Hoop zone definition |
 | 4 | Player_Shooting | Shot attempt detection |
 
-Local path: `Basketball-detection-1/`
+Local path: `store/dataset/basketball-srfkd/` (DVC-tracked — pull via `dvc pull`)
 
 ---
 
@@ -65,54 +65,68 @@ project = rf.workspace("basketball-6vyfz").project("basketball-detection-srfkd")
 dataset = project.version(1).download("yolov11")
 ```
 
-Dataset downloads to `Basketball-detection-1/`. The `data.yaml` paths are
+Dataset downloads to `store/dataset/basketball-srfkd/`. The `data.yaml` paths are
 already configured relative to that directory — no edits needed.
+
+---
+
+## Dataset layout
+
+All datasets live under `store/dataset/`, one named subdirectory each:
+
+```
+store/dataset/
+    basketball-srfkd/          ← Roboflow basketball-detection-srfkd (current)
+        data.yaml
+        train/images/
+        valid/images/
+        test/images/
+    my-gym-footage/            ← custom-labelled footage (example future dataset)
+        data.yaml
+        train/images/
+        ...
+```
+
+To switch the active dataset, change one line in `config.yaml`:
+
+```yaml
+training:
+  dataset: "store/dataset/my-gym-footage/data.yaml"
+```
 
 ---
 
 ## Run training
 
-From the project root with venv activated:
+All training parameters come from `config.yaml → training:`. Run from the project root:
 
 ```bash
-yolo detect train \
-  data="Basketball-detection-1/data.yaml" \
-  model=yolo11m.pt \
-  epochs=50 \
-  imgsz=960 \
-  device=0 \
-  project=weights \
-  name=basketball-ft \
-  batch=8
+python src/train.py
 ```
 
-**Windows PowerShell (use backtick for line continuation):**
+To resume an interrupted run:
 
-```powershell
-yolo detect train `
-  data="Basketball-detection-1/data.yaml" `
-  model=yolo11m.pt `
-  epochs=50 `
-  imgsz=960 `
-  device=0 `
-  project=weights `
-  name=basketball-ft `
-  batch=8 `
-  exist_ok=True
+```bash
+python src/train.py --resume
 ```
+
+This reads `training.dataset`, `training.base_model`, `training.epochs`, etc. from
+config.yaml and calls the Ultralytics trainer. Weights are saved to
+`store/weights/<output_name>/`.
 
 ### Parameter notes
 
-| Parameter | Value | Reason |
+| config.yaml key | Default | Reason |
 |---|---|---|
-| `model` | `yolo11m.pt` | Medium — best speed/accuracy on RTX 4080S |
+| `base_model` | `yolo11m.pt` | Medium — best speed/accuracy on RTX 4080S |
 | `epochs` | 50 | Enough for a clean dataset; increase to 100 if mAP plateaus |
 | `imgsz` | 960 | Matches inference config; smaller than 1280 for FPS headroom |
 | `batch` | 8 | Safe for 16GB VRAM at imgsz=960; batch=16 causes OOM on RTX 4080 Super |
 | `device` | 0 | First GPU (RTX 4080 Super) |
-| `project` | `weights` | Output goes to `weights/basketball-ft/` |
+| `output_name` | `basketball-ft` | Weights saved to `store/weights/<output_name>/` |
 
-Expected training time: **30–60 minutes** on RTX 4080 Super.
+Expected training time: **~1 hr/epoch** on RTX 4080 Super at batch=8, imgsz=960
+(50 epochs ≈ 50 hours for a 9,599-image dataset).
 
 ### Monitoring training
 
@@ -129,10 +143,10 @@ Watch `box_loss` and `cls_loss` — both should trend down. If they plateau
 before epoch 50, training is complete. If still dropping at epoch 50, rerun
 with `epochs=100 resume=True`.
 
-Results and plots saved to `weights/basketball-ft/`:
-- `weights/best.pt` — best checkpoint by val mAP
-- `weights/last.pt` — final epoch checkpoint
-- `results.png` — loss and mAP curves
+Results and plots saved to `store/weights/basketball-ft/`:
+- `store/weights/basketball-ft/weights/best.pt` — best checkpoint by val mAP
+- `store/weights/basketball-ft/weights/last.pt` — final epoch checkpoint
+- `store/weights/basketball-ft/results.png` — loss and mAP curves
 
 ---
 
@@ -142,7 +156,7 @@ Update `config.yaml`:
 
 ```yaml
 model:
-  weights: "weights/basketball-ft/weights/best.pt"
+  weights: "store/weights/basketball-ft/weights/best.pt"
   device: 0
   confidence: 0.4
   iou_threshold: 0.5
@@ -159,10 +173,10 @@ Then run the pipeline as normal:
 
 ```powershell
 python src/pipeline_test.py `
-  --file "test_footage/basketballcv-sample-1.mov" `
+  --file "store/footage/basketballcv-sample-1.mov" `
   --no-preview `
-  --save-output "output/sample-1-basketball-ft.mp4" `
-  --save-log "output/sample-1-basketball-ft-log.json"
+  --save-output "store/output/sample-1-basketball-ft.mp4" `
+  --save-log "store/output/sample-1-basketball-ft-log.json"
 ```
 
 Compare the `ball_detection_rate_pct` in the log against the 14.8% baseline.
@@ -170,13 +184,33 @@ Target: **≥50%** before moving on to `ball_tracker.py`.
 
 ---
 
-## Resume interrupted training
+## Adding a new dataset
 
-If training is interrupted:
+1. Download or export the dataset in YOLOv11 format into a new named subdirectory:
 
-```powershell
-yolo detect train resume model="weights/basketball-ft/weights/last.pt"
-```
+   ```
+   store/dataset/<your-dataset-name>/
+       data.yaml
+       train/images/
+       valid/images/
+       test/images/
+   ```
+
+2. Make sure `data.yaml` paths are relative to the `data.yaml` file itself
+   (i.e. `train: train/images`, not absolute paths).
+
+3. Update `config.yaml`:
+
+   ```yaml
+   training:
+     dataset: "store/dataset/<your-dataset-name>/data.yaml"
+     output_name: "basketball-ft-v2"   # keep weights from different runs separate
+   ```
+
+4. Run `python src/train.py`.
+
+5. After training, run `dvc add store && git add store.dvc && git commit` to
+   version the new weights.
 
 ---
 
@@ -191,7 +225,7 @@ Workflow:
 1. Use `pipeline_test.py --save-output` to capture annotated clips from real games
 2. Label frames where detection fails in [Roboflow](https://app.roboflow.com) (free tier: 1,000 images/month)
 3. Export as YOLOv11 format and merge with the existing dataset
-4. Re-run training with `model="weights/basketball-ft/weights/best.pt"` as starting point
+4. Re-run training with `model="store/weights/basketball-ft/weights/best.pt"` as starting point
    (fine-tune the fine-tune — faster convergence than starting from COCO)
 
 Even 200–300 labelled frames from your gym will meaningfully improve results.

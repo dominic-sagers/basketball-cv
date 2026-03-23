@@ -22,28 +22,27 @@ Runs locally on an RTX 4080 Super (16GB VRAM). No cloud, no internet dependency 
 
 ### Done
 - [x] `video_source.py` — file / RTSP (threaded, auto-reconnect) / USB camera abstraction
-- [x] `source_test.py` — verify any source opens and delivers frames at target FPS
-- [x] `detector.py` — YOLOv11 wrapper, returns typed `Detection` objects
-- [x] `tracker.py` — ByteTrack via `model.track(persist=True)`, returns typed `Track` objects
-- [x] `visualizer.py` — bounding boxes, track IDs, fading ball trajectory trail, FPS info panel
-- [x] `pipeline_test.py` — source → detect/track → visualize, `--save-output` and `--save-log` for offline analysis
+- [x] `detector.py` — YOLOv11 inference → typed `Detection` objects
+- [x] `tracker.py` — ByteTrack via `model.track(persist=True)` → typed `Track` objects
+- [x] `visualizer.py` — bounding boxes, track IDs, fading ball trail, score overlay, FPS panel
+- [x] `game_state.py` — score tracking, Ball_in_Basket detection, 45-frame shot debounce
+- [x] `pipeline_test.py` — full source → detect/track → score → visualize loop with `--save-output` / `--save-log`
+- [x] `train.py` — reads all training params from `config.yaml`; swap dataset in one line
+- [x] `config.yaml` — all thresholds, source types, paths, and training params; nothing hardcoded
 - [x] Docker setup with CUDA 12.4 support (GPU passthrough, camera mounts)
-- [x] `config.yaml` — all thresholds, source types, and paths; never hardcoded in source
-- [x] Test footage recorded at gym-approximated angles (`test_footage/basketballcv-sample-1.mov`)
-- [x] Base model benchmarked: 14.8% ball detection rate, 48.5 FPS at imgsz=960 with `yolo11m.pt`
-- [x] Basketball-specific dataset downloaded (9,599 images, 5 classes incl. Ball_in_Basket, Basket)
-- [x] Fine-tuning pipeline in place — see `docs/training.md`
-
-### In progress
-- [ ] Fine-tuning `yolo11m` on basketball dataset (`Basketball-detection-1/`)
-- [ ] Target: ≥50% ball detection rate (up from 14.8% baseline)
+- [x] `store/` — single DVC-tracked directory for all large assets (weights, dataset, footage, output)
+- [x] DVC initialised — `store.dvc` committed; SSH remote setup documented in `docs/dvc-setup.md`
+- [x] Base model benchmarked: 14.8% ball detection, 48.5 FPS at imgsz=960 (`yolo11m.pt` COCO)
+- [x] Fine-tuned on Roboflow basketball dataset (9,599 imgs, 5 classes) — **27.1% ball detection, mAP50=0.956**
+- [x] Multi-dataset support — each dataset in `store/dataset/<name>/`; active dataset set in `config.yaml`
+- [x] Test footage recorded at gym-approximated angles
 
 ### Up next
+- [ ] DVC remote configured on Ubuntu server (`dvc push` / `dvc pull` for weights + dataset)
 - [ ] `preprocessor.py` — court ROI crop, resize, denoise
-- [ ] `ball_tracker.py` — ball trajectory analysis, shot detection, hoop zone entry
+- [ ] `ball_tracker.py` — ball trajectory analysis, hoop zone entry detection
 - [ ] `pose_estimator.py` — YOLOv11-pose for block/rebound detection
-- [ ] `game_state.py` — single source of truth for score, possession, event log
-- [ ] `event_logic.py` — basketball rules engine (made shot, rebound, assist, block, turnover)
+- [ ] `event_logic.py` — basketball rules engine (rebound, assist, block, turnover)
 
 See [`docs/roadmap.md`](docs/roadmap.md) for the full phase breakdown.
 
@@ -54,6 +53,7 @@ See [`docs/roadmap.md`](docs/roadmap.md) for the full phase breakdown.
 ```
 basketball-cv/
 ├── config.yaml              # all tunable parameters — start here
+├── store.dvc                # DVC pointer to store/ (committed; data pulled separately)
 ├── requirements.txt
 ├── Dockerfile               # CUDA 12.4 + Python 3.13
 ├── docker-compose.yml
@@ -62,24 +62,29 @@ basketball-cv/
 │   ├── video_source.py      # FileVideoSource / RTSPVideoSource / USBCameraSource
 │   ├── detector.py          # YOLOv11 inference → Detection dataclass
 │   ├── tracker.py           # ByteTrack → Track dataclass (persistent IDs)
-│   ├── visualizer.py        # annotated frame rendering (boxes, trail, FPS panel)
+│   ├── visualizer.py        # annotated frame rendering (boxes, trail, score, FPS panel)
+│   ├── game_state.py        # score, event log, shot debouncing
 │   │
-│   ├── pipeline_test.py     # end-to-end test: source → detect/track → visualize
+│   ├── train.py             # fine-tune YOLOv11 from config.yaml (swap dataset in one line)
+│   ├── pipeline_test.py     # end-to-end test: source → detect/track → score → visualize
 │   ├── source_test.py       # verify a video source opens and delivers frames
 │   ├── camera_test.py       # scan USB camera indices
 │   └── detection_test.py    # CUDA check + YOLOv11 FPS benchmark
 │
-├── test_footage/            # drop video files here (gitignored)
-├── weights/                 # fine-tuned .pt files + training runs (gitignored)
-├── output/                  # annotated clips, game logs, frame logs (gitignored)
-├── Basketball-detection-1/  # Roboflow dataset — 9,599 images, 5 classes (gitignored)
+├── store/                   # DVC-tracked (gitignored) — run: dvc pull
+│   ├── footage/             # test video files
+│   ├── weights/             # fine-tuned .pt files + training run artifacts
+│   ├── output/              # annotated clips, game logs, frame logs
+│   └── dataset/             # one subdirectory per dataset
+│       └── basketball-srfkd/    # Roboflow basketball-detection-srfkd (9,599 imgs)
 │
 └── docs/
     ├── roadmap.md           # phase-by-phase feature plan
     ├── architecture.md      # pipeline diagram and module breakdown
     ├── tech-stack.md        # dependency rationale and setup
     ├── models.md            # model options, Roboflow datasets, evaluation results
-    ├── training.md          # how to download dataset and run fine-tuning
+    ├── training.md          # dataset layout, fine-tuning, multi-dataset switching
+    ├── dvc-setup.md         # DVC SSH remote setup and collaborator onboarding
     └── docker.md            # Docker setup and camera passthrough guide
 ```
 
@@ -97,47 +102,54 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
 ```
 
-### 2. Verify GPU
+### 2. Pull data (weights + dataset + footage)
+
+```bash
+# Configure your DVC SSH credentials first — see docs/dvc-setup.md
+dvc pull
+```
+
+Or download the dataset manually and place it under `store/dataset/<name>/` — see [`docs/training.md`](docs/training.md).
+
+### 3. Verify GPU
 
 ```bash
 python src/detection_test.py
 # Expected: RTX 4080 SUPER, ≥60 FPS on synthetic 1080p frames
 ```
 
-### 3. Test a video file
-
-Drop a clip into `test_footage/` then:
+### 4. Run the pipeline
 
 ```bash
-python src/pipeline_test.py --file test_footage/your_clip.mp4
+python src/pipeline_test.py --file store/footage/your_clip.mp4
 ```
 
 Keyboard shortcuts in the preview window:
 - `Q` — quit
 
-### 4. Useful flags
+### 5. Useful flags
 
 ```bash
 # Detection only (no tracking) — good for calibrating confidence threshold
-python src/pipeline_test.py --file test_footage/clip.mp4 --detect-only
+python src/pipeline_test.py --file store/footage/clip.mp4 --detect-only
 
 # Slow playback to inspect frame by frame
-python src/pipeline_test.py --file test_footage/clip.mp4 --playback-speed 0.25
+python src/pipeline_test.py --file store/footage/clip.mp4 --playback-speed 0.25
 
 # Save annotated output clip
-python src/pipeline_test.py --file test_footage/clip.mp4 --save-output output/annotated.mp4
+python src/pipeline_test.py --file store/footage/clip.mp4 --save-output store/output/annotated.mp4
 
-# Save per-frame detection log as JSON for offline analysis
-python src/pipeline_test.py --file test_footage/clip.mp4 --no-preview --save-log output/log.json
+# Save per-frame detection log as JSON
+python src/pipeline_test.py --file store/footage/clip.mp4 --no-preview --save-log store/output/log.json
 
 # Headless (no window — Docker or SSH)
-python src/pipeline_test.py --file test_footage/clip.mp4 --no-preview
+python src/pipeline_test.py --file store/footage/clip.mp4 --no-preview
 
-# Test an RTSP stream
+# Live RTSP stream
 python src/pipeline_test.py --rtsp rtsp://192.168.1.100:554/stream
 ```
 
-### 5. Docker
+### 6. Docker
 
 ```bash
 docker-compose build
@@ -145,6 +157,25 @@ docker-compose run --rm basketball-cv python src/detection_test.py
 ```
 
 See [`docs/docker.md`](docs/docker.md) for GPU passthrough, camera setup, and headless use.
+
+---
+
+## Training
+
+All training parameters live in `config.yaml → training:`. To fine-tune:
+
+```bash
+python src/train.py
+```
+
+To switch dataset, change one line in `config.yaml`:
+
+```yaml
+training:
+  dataset: "store/dataset/my-gym-footage/data.yaml"
+```
+
+See [`docs/training.md`](docs/training.md) for dataset layout, adding new datasets, and resuming interrupted runs.
 
 ---
 
@@ -158,7 +189,7 @@ See [`docs/docker.md`](docs/docker.md) for GPU passthrough, camera setup, and he
 behind basket 1 (Team A end)   behind basket 2 (Team B end)
 ```
 
-Each camera covers its own basket for shot detection. Future: add a halfcourt overhead camera for full-court tracking (assists, turnovers).
+Each camera covers its own basket for shot detection. Future: halfcourt overhead camera for full-court tracking.
 
 ### Video source types (config.yaml)
 
@@ -174,12 +205,12 @@ Switch between types by editing `config.yaml` — no code changes needed.
 
 ## Model weights
 
-The base `yolo11m.pt` (COCO) is used by default and auto-downloads on first run. A fine-tuned basketball model is in training — see [`docs/training.md`](docs/training.md) for how to reproduce it.
+| Model | Ball detection | FPS (imgsz=960) | mAP50 | Classes |
+|---|---|---|---|---|
+| `yolo11m.pt` (COCO baseline) | 14.8% | 48.5 | — | person, sports ball |
+| `basketball-ft/best.pt` (fine-tuned) | **27.1%** | ~48 | **0.956** | Ball, Ball_in_Basket, Player, Basket, Player_Shooting |
 
-| Model | Ball detection | FPS (imgsz=960) | Classes |
-|---|---|---|---|
-| `yolo11m.pt` (COCO baseline) | 14.8% | 48.5 | person, sports ball |
-| `basketball-ft/best.pt` (fine-tuned) | TBD | ~48 | Ball, Ball_in_Basket, Player, Basket, Player_Shooting |
+Weights live in `store/weights/` (DVC-tracked). Pull via `dvc pull` or reproduce via `python src/train.py`. See [`docs/training.md`](docs/training.md).
 
 ---
 
@@ -203,5 +234,6 @@ The base `yolo11m.pt` (COCO) is used by default and auto-downloads on first run.
 | [`docs/architecture.md`](docs/architecture.md) | Pipeline diagram and module responsibilities |
 | [`docs/tech-stack.md`](docs/tech-stack.md) | Dependency rationale, setup steps |
 | [`docs/models.md`](docs/models.md) | Model options, Roboflow datasets, evaluation results |
-| [`docs/training.md`](docs/training.md) | Dataset download, fine-tuning, resuming training |
+| [`docs/training.md`](docs/training.md) | Dataset layout, fine-tuning, multi-dataset switching |
+| [`docs/dvc-setup.md`](docs/dvc-setup.md) | DVC SSH remote setup and collaborator onboarding |
 | [`docs/docker.md`](docs/docker.md) | Docker setup, GPU access, camera passthrough |

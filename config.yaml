@@ -13,13 +13,13 @@
 sources:
   - name: "basket_1"
     type: "file"
-    path: "test_footage/basket_1.mp4"
+    path: "store/footage/basket_1.mp4"
     loop: true             # loop file for repeated testing
     team: "A"              # team this camera covers
 
   - name: "basket_2"
     type: "file"
-    path: "test_footage/basket_2.mp4"
+    path: "store/footage/basket_2.mp4"
     loop: true
     team: "B"
 
@@ -50,21 +50,37 @@ sources:
 # Detection model
 # ---------------------------------------------------------------------------
 model:
-  weights: "yolo11m.pt"        # base weights; swap for fine-tuned basketball weights
+  weights: "store/weights/basketball-ft.pt"   # fine-tuned on basketball-detection-srfkd (9,599 imgs, 50 epochs)
+  # weights: "yolo11m.pt"                     # COCO baseline — 14.8% ball detection, 48.5 FPS
   device: 0                    # GPU index (0 = first GPU); "cpu" for CPU-only
-  confidence: 0.4              # 0.25 tested — no improvement (small input size is the bottleneck, not threshold)
+  confidence: 0.4
   iou_threshold: 0.5
-  input_size: 960              # 1280 → ~26 FPS, 960 → ~35 FPS on RTX 4080S (revert if ball misses increase)
-  # class_map: COCO class IDs to keep. Defaults shown below.
-  # Override when using a fine-tuned model with different class indices.
+  input_size: 960              # 1280 → ~26 FPS, 960 → ~48 FPS on RTX 4080S
   class_map:
-    0:  "person"
-    32: "sports ball"
-  # Fine-tuned model example (hoop as class 2):
-  # class_map:
-  #   0: "person"
-  #   1: "sports ball"
-  #   2: "hoop"
+    0: "Ball"
+    1: "Ball_in_Basket"
+    2: "Player"
+    3: "Basket"
+    4: "Player_Shooting"
+
+# ---------------------------------------------------------------------------
+# Training
+# Swap `dataset` to point at a different store/dataset/<name>/data.yaml to
+# train on a different dataset without changing anything else.
+# Each dataset lives in its own named subdirectory under store/dataset/.
+#
+# Known datasets (all stored in store/dataset/):
+#   basketball-srfkd   — Roboflow basketball-detection-srfkd, 9,599 imgs, 5 classes
+#                        mAP50=0.956, ball=0.943, basket=0.979 (50 epochs, yolo11m)
+# ---------------------------------------------------------------------------
+training:
+  dataset: "store/dataset/basketball-srfkd/data.yaml"   # active dataset for yolo train
+  base_model: "yolo11m.pt"    # starting weights (COCO); swap for a .pt to fine-tune further
+  epochs: 50
+  imgsz: 960
+  batch: 8                    # 8 = safe for 16GB VRAM at imgsz=960; 16 causes OOM
+  device: 0
+  output_name: "basketball-ft"    # weights saved to store/weights/<output_name>/
 
 # ---------------------------------------------------------------------------
 # Multi-object tracking (ByteTrack)
@@ -96,5 +112,5 @@ event_logic:
 # Output
 # ---------------------------------------------------------------------------
 output:
-  log_dir: "output/"
+  log_dir: "store/output/"
   scoreboard_display: 1        # monitor index for Phase 1.5 scoreboard overlay

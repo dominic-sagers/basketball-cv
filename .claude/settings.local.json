@@ -2,7 +2,26 @@
   "permissions": {
     "allow": [
       "WebSearch",
-      "Bash(ls -la f:/personal_repos/basketball-cv/swishai_tmp/BE/*/)"
+      "Bash(ls -la f:/personal_repos/basketball-cv/swishai_tmp/BE/*/)",
+      "Bash(pip show:*)",
+      "Bash(pip install:*)",
+      "Bash(dvc init:*)",
+      "Bash(mkdir -p store/footage store/weights store/output store/dataset)",
+      "Bash(mv test_footage/* store/footage/)",
+      "Bash(mv weights/* store/weights/)",
+      "Bash(mv output/* store/output/)",
+      "Bash(mv Basketball-detection-1/* store/dataset/)",
+      "Bash(dvc add:*)",
+      "Bash(mkdir -p store/dataset/basketball-srfkd)",
+      "Bash(mv store/dataset/README.dataset.txt store/dataset/README.roboflow.txt store/dataset/data.yaml store/dataset/train store/dataset/valid store/dataset/test store/dataset/basketball-srfkd/)",
+      "Bash(dvc config:*)",
+      "Bash(python src/download_footage.py \"https://www.youtube.com/watch?v=ePCQcvOuOAo\" --name \"basketball-sample-2\")",
+      "Bash(py src/download_footage.py \"https://www.youtube.com/watch?v=ePCQcvOuOAo\" --name \"basketball-sample-2\")",
+      "Bash(winget install:*)",
+      "Bash(where.exe ffmpeg:*)",
+      "Read(//c/Users/domin/AppData/Local/**)",
+      "Bash(FFMPEG=\"C:/Users/domin/AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-8.1-full_build/bin/ffmpeg.exe\")",
+      "Bash(py src/pipeline_test.py --file \"store/footage/basketball-cv-sample-5-on-5.mov\" --save-output \"store/output/5on5-annotated.mp4\" --save-log \"store/output/5on5-log.json\" --no-preview)"
     ]
   }
 }

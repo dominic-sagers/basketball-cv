@@ -4,23 +4,20 @@ __pycache__/
 .venv/
 *.egg-info/
 
-# Model weights and training runs (large binary files)
-weights/
-*.pt
-*.onnx
-runs/
+# All large assets live in store/ — tracked by DVC, not git (dvc pull to restore)
+# /store entry below is managed by DVC (dvc add store)
+/store
 
-# Roboflow datasets (download via docs/training.md)
+# Stale top-level dirs (moved to store/ — safe to remove if empty)
+weights/
+output/
+test_footage/
 Basketball-detection-1/
 
-# Output / game logs
-output/
-
-# Test footage (video files are large, share separately)
-test_footage/*.mp4
-test_footage/*.avi
-test_footage/*.mov
-test_footage/*.mkv
+# Ultralytics training output
+runs/
+*.pt
+*.onnx
 
 # IDE
 .vscode/

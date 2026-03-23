@@ -27,13 +27,8 @@ ENV/
 *.swo
 *~
 
-# Output files
-output/*
-!output/.gitkeep
-
-# Weights (large files - download separately or mount as volume)
-weights/*
-!weights/.gitkeep
+# Large assets (DVC-tracked) — mount as volume at runtime instead
+store/
 *.pt
 *.pth
 *.onnx
@@ -53,9 +48,7 @@ docker-compose.yml
 # Documentation (already in image if needed)
 docs/
 
-# Test footage/data
-test_data/
-test_footage/
+# Video files
 *.mp4
 *.avi
 *.mov

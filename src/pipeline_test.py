@@ -50,7 +50,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.detector import Detector
 from src.tracker import Tracker
 from src.video_source import FileVideoSource, RTSPVideoSource, USBCameraSource, VideoSource, VideoSourceFactory
-from src.visualizer import Visualizer
+from src.visualizer import Visualizer, BALL_CLASSES
+from src.game_state import GameState
 
 logging.basicConfig(
     level=logging.INFO,
@@ -68,6 +69,7 @@ def run_pipeline(
     source: VideoSource,
     detector: Detector | None,
     tracker: Tracker | None,
+    game_state: GameState | None = None,
     *,
     show_preview: bool = True,
     save_path: str | None = None,
@@ -123,6 +125,13 @@ def run_pipeline(
             elif tracker:
                 tracks = tracker.track(frame)
 
+            # ── Game state update ──────────────────────────────────────
+            score_flash = False
+            if game_state is not None and tracks:
+                events = game_state.process_frame(tracks, frame_number, source.name)
+                if events:
+                    score_flash = True
+
             # ── FPS measurement ────────────────────────────────────────
             elapsed = time.perf_counter() - t_frame
             if elapsed > 0:
@@ -147,7 +156,7 @@ def run_pipeline(
                             "bbox": list(t.bbox),
                             "center": list(t.center),
                         })
-                        if t.class_name == "sports ball":
+                        if t.class_name in BALL_CLASSES:
                             entry["ball_detected"] = True
                 elif detections:
                     for d in detections:
@@ -157,7 +166,7 @@ def run_pipeline(
                             "bbox": list(d.bbox),
                             "center": list(d.center),
                         })
-                        if d.class_name == "sports ball":
+                        if d.class_name in BALL_CLASSES:
                             entry["ball_detected"] = True
                 frame_log.append(entry)
 
@@ -169,6 +178,8 @@ def run_pipeline(
                 source_name=source.name,
                 fps=recent_fps,
                 frame_number=frame_number,
+                score=game_state.score if game_state else None,
+                score_flash=score_flash,
             )
 
             # ── Output ─────────────────────────────────────────────────
@@ -200,7 +211,8 @@ def run_pipeline(
         logger.info("Interrupted.")
     finally:
         source.release()
-        cv2.destroyAllWindows()
+        if show_preview:
+            cv2.destroyAllWindows()
         if writer is not None:
             writer.release()
         if log_path and frame_log:
@@ -208,13 +220,14 @@ def run_pipeline(
             ball_frames = sum(1 for e in frame_log if e["ball_detected"])
             summary = {
                 "source": source.name,
-                "model": "yolo11m.pt",
+                "model": cfg_model if "cfg_model" in dir() else "unknown",
                 "recorded_at": datetime.now().isoformat(timespec="seconds"),
                 "total_frames": frame_number,
                 "source_fps": source.fps,
                 "ball_detected_frames": ball_frames,
                 "ball_detection_rate_pct": round(100 * ball_frames / frame_number, 1) if frame_number else 0,
                 "avg_inference_ms": round(sum(e["inference_ms"] for e in frame_log) / len(frame_log), 1),
+                "game_state": game_state.to_dict() if game_state else None,
                 "frames": frame_log,
             }
             with open(log_path, "w") as f:
@@ -312,6 +325,9 @@ def main() -> None:
                 sys.exit(1)
         sources = [VideoSourceFactory.from_config(s) for s in source_configs]
 
+    # ── Game state ────────────────────────────────────────────────────────
+    game_state = GameState.from_config(cfg)
+
     # ── Run pipeline on each source ───────────────────────────────────────
     show_preview = not args.no_preview
     for source in sources:
@@ -332,6 +348,7 @@ def main() -> None:
             source=source,
             detector=detector,
             tracker=tracker,
+            game_state=game_state,
             show_preview=show_preview,
             save_path=save_path,
             log_path=log_path,

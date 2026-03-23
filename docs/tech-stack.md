@@ -135,8 +135,8 @@ python -c "from ultralytics import YOLO; YOLO('yolo11m.pt')"
 python -c "import torch; print(torch.cuda.get_device_name(0))"
 
 # 6. Verify sources and pipeline
-python src/source_test.py --file test_footage/your_clip.mp4
-python src/pipeline_test.py --file test_footage/your_clip.mp4
+python src/source_test.py --file store/footage/your_clip.mp4
+python src/pipeline_test.py --file store/footage/your_clip.mp4
 ```
 
 ---
@@ -150,12 +150,12 @@ Key top-level sections:
 sources:
   - name: "basket_1"
     type: "file"          # "file" | "rtsp" | "usb"
-    path: "test_footage/basket_1.mp4"
+    path: "store/footage/basket_1.mp4"
     loop: true
     team: "A"
 
 model:
-  weights: "yolo11m.pt"   # or "weights/your_finetuned.pt"
+  weights: "store/weights/your_finetuned.pt"   # or "yolo11m.pt" for COCO baseline
   device: 0               # GPU index; "cpu" for testing without GPU
   confidence: 0.4
   iou_threshold: 0.5
@@ -177,6 +177,6 @@ event_logic:
   block_hand_ball_dist_px: 40
 
 output:
-  log_dir: "output/"
+  log_dir: "store/output/"
   scoreboard_display: 1
 ```

@@ -53,10 +53,22 @@ class Colors:
     FPS_FAIL     = ( 60,  60, 220)   # red
 
 
+# Class names that represent the ball (COCO base model + fine-tuned model)
+BALL_CLASSES: frozenset[str] = frozenset({"sports ball", "Ball", "Ball_in_Basket"})
+BASKET_CLASSES: frozenset[str] = frozenset({"hoop", "Basket"})
+PLAYER_CLASSES: frozenset[str] = frozenset({"person", "Player", "Player_Shooting"})
+
 CLASS_COLOR: dict[str, tuple[int, int, int]] = {
-    "person":      Colors.PLAYER,
-    "sports ball": Colors.BALL,
-    "hoop":        Colors.HOOP,
+    # COCO base model
+    "person":          Colors.PLAYER,
+    "sports ball":     Colors.BALL,
+    "hoop":            Colors.HOOP,
+    # Fine-tuned basketball model
+    "Ball":            Colors.BALL,
+    "Ball_in_Basket":  Colors.HOOP,       # gold — made basket event
+    "Player":          Colors.PLAYER,
+    "Basket":          Colors.HOOP,
+    "Player_Shooting": Colors.TEAM_B,     # red tint — shooting event
 }
 
 TEAM_COLOR: dict[str, tuple[int, int, int]] = {
@@ -130,6 +142,8 @@ class Visualizer:
         frame_number: int | None = None,
         team_assignments: dict[int, str] | None = None,   # track_id → "A" | "B"
         extra_labels: list[str] | None = None,            # freeform text in info panel
+        score: dict[str, int] | None = None,              # {"A": 4, "B": 6}
+        score_flash: bool = False,                        # pulse scoreboard on new basket
     ) -> np.ndarray:
         """
         Draw all overlays onto a copy of `frame` and return the result.
@@ -165,12 +179,12 @@ class Visualizer:
         ball_center: tuple[int, int] | None = None
         if tracks:
             for t in tracks:
-                if t.class_name == "sports ball":
+                if t.class_name in BALL_CLASSES:
                     ball_center = t.center
                     break
         elif detections:
             for d in detections:
-                if d.class_name == "sports ball":
+                if d.class_name in BALL_CLASSES:
                     ball_center = d.center
                     break
         self._ball_trail.update(ball_center)
@@ -182,6 +196,8 @@ class Visualizer:
         elif detections:
             self._draw_detections(canvas, detections)
         self._draw_info_panel(canvas, source_name, display_fps, frame_number, tracks, detections, extra_labels)
+        if score is not None:
+            self._draw_scoreboard(canvas, score, flash=score_flash)
 
         return canvas
 
@@ -342,6 +358,54 @@ class Visualizer:
         if team_assignments and track.track_id in team_assignments:
             return TEAM_COLOR.get(team_assignments[track.track_id], Colors.PLAYER)
         return CLASS_COLOR.get(track.class_name, Colors.PLAYER)
+
+    def _draw_scoreboard(
+        self,
+        canvas: np.ndarray,
+        score: dict[str, int],
+        flash: bool = False,
+    ) -> None:
+        """
+        Draw a prominent score panel centred at the top of the frame.
+
+        Shows  A  4 – 6  B  with team colours.
+        Flashes a bright border for one frame when a basket is scored.
+        """
+        h, w = canvas.shape[:2]
+        a_score = score.get("A", 0)
+        b_score = score.get("B", 0)
+
+        # Panel dimensions
+        panel_w, panel_h = 320, 64
+        x0 = (w - panel_w) // 2
+        y0 = 12
+
+        # Background
+        bg_color = (60, 40, 20) if not flash else (40, 140, 255)   # flash orange on score
+        overlay = canvas.copy()
+        cv2.rectangle(overlay, (x0, y0), (x0 + panel_w, y0 + panel_h), bg_color, -1)
+        cv2.addWeighted(overlay, 0.72, canvas, 0.28, 0, canvas)
+
+        # Border
+        border_color = Colors.BALL if flash else (100, 80, 60)
+        cv2.rectangle(canvas, (x0, y0), (x0 + panel_w, y0 + panel_h), border_color, 2)
+
+        font = cv2.FONT_HERSHEY_DUPLEX
+        cy = y0 + panel_h - 14     # baseline y
+
+        # Team A score (left, green)
+        a_text = str(a_score)
+        cv2.putText(canvas, "A", (x0 + 14, cy), font, 0.7, Colors.TEAM_A, 1, cv2.LINE_AA)
+        cv2.putText(canvas, a_text, (x0 + 40, cy), font, 1.3, Colors.TEAM_A, 2, cv2.LINE_AA)
+
+        # Dash separator (centre)
+        cv2.putText(canvas, "–", (x0 + panel_w // 2 - 12, cy), font, 1.0, (200, 200, 200), 1, cv2.LINE_AA)
+
+        # Team B score (right, red)
+        b_text = str(b_score)
+        b_score_x = x0 + panel_w - 70
+        cv2.putText(canvas, b_text, (b_score_x, cy), font, 1.3, Colors.TEAM_B, 2, cv2.LINE_AA)
+        cv2.putText(canvas, "B", (x0 + panel_w - 28, cy), font, 0.7, Colors.TEAM_B, 1, cv2.LINE_AA)
 
     def reset_trail(self) -> None:
         """Clear the ball trail — call between game periods or on source switch."""

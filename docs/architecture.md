@@ -86,7 +86,7 @@
 - Runs in a separate thread / process
 
 ### `src/data_logger.py`
-- Writes timestamped event log to `output/game_YYYYMMDD.json`
+- Writes timestamped event log to `store/output/game_YYYYMMDD.json`
 - Phase 2: converts to Excel with pandas + openpyxl
 
 ### `config.yaml`
