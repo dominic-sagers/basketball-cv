@@ -32,28 +32,54 @@
 
 ## Module breakdown
 
-### `src/camera.py`
-- Opens and manages N camera streams (OpenCV VideoCapture)
-- Handles frame sync across multiple cameras
-- Config: camera indices or RTSP URLs, target resolution, FPS
+### Built ✓
+
+### `src/video_source.py`
+- `FileVideoSource`, `RTSPVideoSource` (threaded, auto-reconnect), `USBCameraSource`
+- `VideoSourceFactory.from_config()` — instantiates the right source from config.yaml
+- All sources share the `VideoSource` ABC: `open()`, `read()`, `release()`, `fps`, `name`
+
+### `src/detector.py`
+- Wraps Ultralytics YOLOv11; returns typed `Detection` dataclass (bbox, class_name, confidence, center)
+- `Detector.from_config(model_cfg)` — loads weights, device, confidence, class_map from config
+- Classes: `Ball`, `Ball_in_Basket`, `Player`, `Basket`, `Player_Shooting` (fine-tuned model)
+
+### `src/tracker.py`
+- Wraps ByteTrack via `model.track(persist=True)`; returns typed `Track` dataclass (extends Detection with track_id)
+- `Tracker.reset()` — clears track state between sources
+
+### `src/visualizer.py`
+- Bounding boxes colour-coded by class, track ID labels, confidence scores
+- Fading ball trajectory trail (40-frame deque)
+- Centred scoreboard overlay with team colours and orange flash on basket
+- FPS + source info panel
+
+### `src/game_state.py`
+- Single source of truth for score (`{"A": 0, "B": 0}`), event log
+- `process_frame(tracks, frame_number, source_name)` — detects `Ball_in_Basket`, increments score, applies 45-frame shot debounce
+- `from_config(cfg)` — reads `sources[].team` and `event_logic.shot_cooldown_frames` from config
+
+### `src/train.py`
+- Reads all training params from `config.yaml → training:`
+- `--resume` flag continues from last checkpoint
+- Saves weights to `store/weights/<output_name>/`
+
+### `src/pipeline_test.py`
+- End-to-end loop: source → detect/track → game_state → visualize
+- `--save-output` writes annotated mp4; `--save-log` writes per-frame JSON with ball detection rate
+- `--detect-only`, `--playback-speed`, `--no-preview` flags
+
+### `src/camera_test.py` / `src/source_test.py` / `src/detection_test.py`
+- Diagnostic scripts: scan USB indices, verify a source opens, benchmark CUDA inference FPS
+
+---
+
+### Planned
 
 ### `src/preprocessor.py`
 - Resize frames to model input size
 - Optional: denoise, contrast adjustment for poor gym lighting
 - Court ROI crop (remove scoreboard / bleachers from inference region)
-
-### `src/detector.py`
-- Wraps Ultralytics YOLOv11
-- Runs inference on each frame
-- Returns: bounding boxes, class labels, confidence scores
-- Classes to detect: `person`, `sports ball`, `hoop` (custom class)
-- CUDA required — raises on CPU-only run
-
-### `src/tracker.py`
-- Wraps ByteTrack (via Ultralytics built-in)
-- Maintains persistent player track IDs within a session
-- Outputs: list of tracked players with IDs + bounding boxes each frame
-- Handles occlusion recovery (ByteTrack's low-confidence second-pass association)
 
 ### `src/ball_tracker.py`
 - Tracks ball position across frames

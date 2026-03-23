@@ -1,65 +1,149 @@
 # DVC Setup Guide
 
-DVC tracks the `store/` directory (weights, dataset, footage, output) so that large
+DVC tracks the `store/` directory (weights, dataset, footage, output) so large
 binary files never enter git history. The git repo stays lightweight and public;
-only people you give SSH access to can pull the actual data.
+only people on your Tailscale network can reach the server to pull or push data.
+
+## Current remote
+
+The remote is already configured. The connection details are in `.dvc/config`
+(committed to the repo). New machines only need Tailscale network access and
+`pip install "dvc[ssh]"` — no other configuration required.
+
+The server is only reachable over Tailscale — the remote URL in `.dvc/config`
+is not usable without being on the network.
 
 ---
 
-## How it works (security model)
+## Security model
 
 | What | Where | Who sees it |
 |---|---|---|
 | File hashes (`store.dvc`) | Git repo | Everyone (public) |
-| Remote URL (host + path) | `.dvc/config` (committed) | Everyone (public) |
-| SSH credentials (user, key path) | `.dvc/config.local` (gitignored) | Local machine only |
-| Actual data (weights, dataset, video) | Ubuntu server | Only people with the SSH key |
+| Remote URL (Tailscale hostname + path) | `.dvc/config` (committed) | Everyone (public — safe, host is unreachable off-network) |
+| SSH credentials | None — Tailscale SSH handles auth | N/A |
+| Actual data (weights, dataset, video) | Ubuntu server via Tailscale | Only people on your Tailscale network |
 
-The `.dvc/config.local` file is gitignored by DVC automatically — credentials
-never touch git history.
+**No SSH keys to generate, share, or rotate.** Authentication is handled entirely
+by Tailscale identity. Access is granted or revoked from the Tailscale admin console.
 
 ---
 
-## Server-side setup (do once, on your Ubuntu server)
+## How access works
 
-```bash
-# 1. Create a dedicated user with a home dir but no login shell
-sudo useradd --system --create-home --shell /usr/sbin/nologin dvc
-
-# 2. Create the storage directory
-sudo mkdir -p /srv/dvc/basketball-cv
-sudo chown dvc:dvc /srv/dvc/basketball-cv
-
-# 3. Generate a keypair for DVC access (on your local machine, not the server)
-ssh-keygen -t ed25519 -C "basketball-cv-dvc" -f ~/.ssh/basketball_cv_dvc
-# This creates:
-#   ~/.ssh/basketball_cv_dvc       ← private key (share with collaborators out-of-band)
-#   ~/.ssh/basketball_cv_dvc.pub   ← public key  (goes on the server)
-
-# 4. Authorise the public key for the dvc user on the server
-sudo -u dvc mkdir -p /home/dvc/.ssh
-sudo -u dvc tee /home/dvc/.ssh/authorized_keys < ~/.ssh/basketball_cv_dvc.pub
-sudo chmod 700 /home/dvc/.ssh
-sudo chmod 600 /home/dvc/.ssh/authorized_keys
+```
+Collaborator installs Tailscale
+      ↓
+Joins your network with a pre-auth key you generate
+      ↓
+Their machine can reach the server over Tailscale
+      ↓
+dvc pull / dvc push work — Tailscale SSH authenticates them automatically
 ```
 
 ---
 
-## Configure the DVC remote (do once, on your local machine)
+## Server-side setup (do once)
+
+### 1. Install Tailscale on the Ubuntu server
 
 ```bash
-# Add the remote (this writes to .dvc/config — safe to commit)
-dvc remote add origin ssh://YOUR_SERVER_HOSTNAME/srv/dvc/basketball-cv
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+```
 
-# Set your local SSH key (this writes to .dvc/config.local — gitignored)
-dvc remote modify --local origin user dvc
-dvc remote modify --local origin keyfile ~/.ssh/basketball_cv_dvc
+Follow the auth link to connect the server to your Tailscale account.
 
-# Set as default remote
+### 2. Enable Tailscale SSH on the server
+
+```bash
+sudo tailscale up --ssh
+```
+
+This lets Tailscale handle SSH authentication — no `authorized_keys` needed.
+
+### 3. Note the server's Tailscale hostname
+
+```bash
+tailscale status
+# Look for your server's MagicDNS name, e.g.: myserver.tail12345.ts.net
+```
+
+Or find it in the Tailscale admin console at tailscale.com/admin/machines.
+
+### 4. Create a dedicated user for DVC storage
+
+```bash
+sudo useradd --system --create-home --shell /bin/bash dvc
+sudo mkdir -p /srv/dvc/basketball-cv
+sudo chown dvc:dvc /srv/dvc/basketball-cv
+```
+
+### 5. Configure Tailscale SSH ACL to allow the dvc user
+
+In your Tailscale admin console → **Access controls**, add a rule allowing your
+network members to SSH as the `dvc` user on the server:
+
+```json
+{
+  "ssh": [
+    {
+      "action": "accept",
+      "src": ["autogroup:member"],
+      "dst": ["tag:dvc-server"],
+      "users": ["dvc"]
+    }
+  ]
+}
+```
+
+Tag your server with `tag:dvc-server` in the admin console, or simplify by
+allowing access to the specific server by its Tailscale IP.
+
+---
+
+## Install DVC (do once per machine)
+
+DVC is included in `requirements.txt` but must be installed with the SSH extra:
+
+```bash
+pip install "dvc[ssh]"
+```
+
+Or if using the venv:
+```bash
+pip install -r requirements.txt   # includes dvc[ssh]
+```
+
+---
+
+## Configure the DVC remote (do once, when setting up a new server)
+
+> **Already done** for this project — `.dvc/config` is committed and points at
+> the active remote. Skip this section unless you are migrating to a new server.
+
+First, confirm you're on the Tailscale network:
+
+```bash
+tailscale status
+```
+
+Add the remote using the server's Tailscale IP or MagicDNS hostname and the
+storage path on that server:
+
+```bash
+dvc remote add origin ssh://dvc@<TAILSCALE_IP_OR_HOSTNAME>/<STORAGE_PATH>
 dvc remote default origin
 ```
 
-Replace `YOUR_SERVER_HOSTNAME` with your server's hostname or IP.
+Commit the result:
+
+```bash
+git add .dvc/config
+git commit -m "Configure DVC SSH remote over Tailscale"
+```
+
+No `--local` flags needed — there are no credentials to keep private.
 
 ---
 
@@ -69,40 +153,45 @@ Replace `YOUR_SERVER_HOSTNAME` with your server's hostname or IP.
 dvc push
 ```
 
-This uploads the contents of `store/` to the server. Run after training new weights
-or adding new footage.
-
 ---
 
 ## Collaborator onboarding
 
-Give a collaborator access in two steps:
+Granting access requires two steps, both done from the **Tailscale admin console**:
 
-**Step 1 — Share the private key** (out-of-band: Signal, encrypted email, etc.)
+**Step 1 — Generate a pre-auth key**
 
-```
-~/.ssh/basketball_cv_dvc   ← send this file securely, never via git or email plaintext
-```
+1. Go to tailscale.com/admin/settings/keys
+2. Click **Generate auth key**
+3. Set it as **Reusable: No** (single-use per collaborator) and set an expiry
+4. Share the key with the collaborator (Signal, encrypted email, etc.)
 
-**Step 2 — They run two commands** after cloning the repo:
+**Step 2 — They run two commands**
 
 ```bash
+# Install Tailscale (Linux/Mac/Windows — see tailscale.com/download)
+# Then join your network:
+tailscale up --authkey=tskey-auth-XXXXXXXXXXXXXXXX
+
+# Configure the DVC remote user (matches the dvc user on the server)
 dvc remote modify --local origin user dvc
-dvc remote modify --local origin keyfile /path/to/basketball_cv_dvc
 ```
 
-Then they can pull all data:
+Then they can pull:
 
 ```bash
 dvc pull
 ```
 
+That's it. No SSH keys, no certificates, no `.dvc/config.local` secrets.
+
 ---
 
 ## Revoking access
 
-Remove a collaborator's public key from `/home/dvc/.ssh/authorized_keys` on the server.
-No git changes needed — the remote URL stays the same.
+In the Tailscale admin console → **Machines**, find their device and click
+**Remove**. They immediately lose network access to the server.
+No key rotation, no `authorized_keys` edits needed.
 
 ---
 
@@ -110,10 +199,14 @@ No git changes needed — the remote URL stays the same.
 
 | Command | What it does |
 |---|---|
-| `dvc pull` | Download `store/` from the remote (after cloning or when remote is updated) |
+| `dvc pull` | Download `store/` from the remote |
 | `dvc push` | Upload local `store/` changes to the remote |
 | `dvc status` | Check whether local and remote are in sync |
 | `dvc add store` | Re-hash `store/` after adding new files (updates `store.dvc`) |
 
-After `dvc add store`, commit the updated `store.dvc` to git so collaborators know
-new data is available.
+After `dvc add store`, commit the updated `store.dvc` so collaborators know
+new data is available:
+
+```bash
+git add store.dvc && git commit -m "Update store: <what changed>"
+```

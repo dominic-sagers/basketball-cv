@@ -21,7 +21,8 @@
       "Bash(where.exe ffmpeg:*)",
       "Read(//c/Users/domin/AppData/Local/**)",
       "Bash(FFMPEG=\"C:/Users/domin/AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-8.1-full_build/bin/ffmpeg.exe\")",
-      "Bash(py src/pipeline_test.py --file \"store/footage/basketball-cv-sample-5-on-5.mov\" --save-output \"store/output/5on5-annotated.mp4\" --save-log \"store/output/5on5-log.json\" --no-preview)"
+      "Bash(py src/pipeline_test.py --file \"store/footage/basketball-cv-sample-5-on-5.mov\" --save-output \"store/output/5on5-annotated.mp4\" --save-log \"store/output/5on5-log.json\" --no-preview)",
+      "Bash(dvc remote:*)"
     ]
   }
 }

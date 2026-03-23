@@ -28,7 +28,7 @@ pip install opencv-python
 ```
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 ```
-- CUDA 12.1 build for RTX 4080 Super
+- CUDA 12.4 build — required for Python 3.13 (cu121 has no 3.13 wheels)
 - Verify with: `torch.cuda.is_available()` and `torch.cuda.get_device_name(0)`
 
 ### Pandas + openpyxl
@@ -73,6 +73,14 @@ pip install roboflow
 - Access to basketball-specific pretrained datasets for fine-tuning
 - See `docs/models.md` for the full dataset list with URLs and download instructions
 - Only needed if you fine-tune; not required at runtime
+
+### DVC
+```
+pip install "dvc[ssh]"
+```
+- Data Version Control — tracks large files (weights, dataset, footage) separately from git
+- SSH remote over Tailscale — see `docs/dvc-setup.md` for setup and access
+- `store.dvc` committed to git; actual data pulled with `dvc pull`
 
 ### OBS Studio (Phase 1.5, not a Python dep)
 - For projecting the scoreboard overlay to a second display or projector
@@ -122,14 +130,15 @@ Target: ≥60 FPS on a single 1080p frame with yolo11m.
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 
-# 2. Install core deps
-pip install ultralytics opencv-python pandas openpyxl pygame pyyaml
-
-# 3. Install PyTorch with CUDA 12.1
+# 2. Install PyTorch with CUDA 12.4
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 
-# 4. Download base model weights (cached locally after first run)
-python -c "from ultralytics import YOLO; YOLO('yolo11m.pt')"
+# 3. Install all other dependencies (includes DVC)
+pip install -r requirements.txt
+
+# 4. Pull data — weights, dataset, footage (requires Tailscale + DVC remote access)
+# See docs/dvc-setup.md for access setup
+dvc pull
 
 # 5. Verify CUDA
 python -c "import torch; print(torch.cuda.get_device_name(0))"
@@ -155,14 +164,26 @@ sources:
     team: "A"
 
 model:
-  weights: "store/weights/your_finetuned.pt"   # or "yolo11m.pt" for COCO baseline
+  weights: "store/weights/basketball-ft.pt"   # fine-tuned; or "yolo11m.pt" for COCO baseline
   device: 0               # GPU index; "cpu" for testing without GPU
   confidence: 0.4
   iou_threshold: 0.5
-  input_size: 1280
+  input_size: 960
   class_map:
-    0:  "person"
-    32: "sports ball"     # extend with hoop class once fine-tuned
+    0: "Ball"
+    1: "Ball_in_Basket"
+    2: "Player"
+    3: "Basket"
+    4: "Player_Shooting"
+
+training:
+  dataset: "store/dataset/basketball-srfkd/data.yaml"
+  base_model: "yolo11m.pt"
+  epochs: 50
+  imgsz: 960
+  batch: 8
+  device: 0
+  output_name: "basketball-ft"
 
 tracking:
   tracker: "bytetrack"

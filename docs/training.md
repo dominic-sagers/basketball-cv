@@ -50,9 +50,23 @@ Local path: `store/dataset/basketball-srfkd/` (DVC-tracked — pull via `dvc pul
 
 ---
 
-## Download the dataset
+## Get the dataset
 
-Requires a free [Roboflow](https://roboflow.com) account and API key.
+### Option A — DVC pull (recommended)
+
+If you have been granted access to the DVC remote, this restores the full
+`store/` directory including the dataset, weights, and footage in one command:
+
+```bash
+dvc pull
+```
+
+See `docs/dvc-setup.md` for Tailscale access setup.
+
+### Option B — Download from Roboflow
+
+If you don't have DVC access, download directly. Requires a free
+[Roboflow](https://roboflow.com) account and API key.
 
 ```bash
 pip install roboflow
@@ -62,11 +76,11 @@ pip install roboflow
 from roboflow import Roboflow
 rf = Roboflow(api_key="YOUR_API_KEY")
 project = rf.workspace("basketball-6vyfz").project("basketball-detection-srfkd")
-dataset = project.version(1).download("yolov11")
+dataset = project.version(1).download("yolov11", location="store/dataset/basketball-srfkd")
 ```
 
-Dataset downloads to `store/dataset/basketball-srfkd/`. The `data.yaml` paths are
-already configured relative to that directory — no edits needed.
+The `data.yaml` paths are already configured relative to the dataset directory —
+no edits needed.
 
 ---
 
@@ -209,8 +223,14 @@ Target: **≥50%** before moving on to `ball_tracker.py`.
 
 4. Run `python src/train.py`.
 
-5. After training, run `dvc add store && git add store.dvc && git commit` to
-   version the new weights.
+5. After training, version and push the new weights:
+
+   ```bash
+   dvc add store
+   dvc push
+   git add store.dvc
+   git commit -m "Add weights: <dataset-name>, <result summary>"
+   ```
 
 ---
 

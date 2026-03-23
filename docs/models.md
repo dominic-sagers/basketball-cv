@@ -72,33 +72,37 @@ frequent track loss, it's the first alternative to try.
 
 ## Pretrained basketball weights
 
-### SwishAI (recommended starting point)
+### basketball-ft (current — fine-tuned in-project)
 
-The most directly usable open-weights basketball model found.
-Trained on Roboflow basketball datasets, `yolo11s` base.
+Fine-tuned `yolo11m` on the Roboflow basketball-detection-srfkd dataset (9,599 images, 50 epochs).
+Weights are DVC-tracked at `store/weights/basketball-ft.pt` — pull with `dvc pull`.
+
+| Metric | Value |
+|---|---|
+| Ball detection rate | 27.1% (↑ from 14.8% COCO baseline) |
+| Overall mAP50 | 0.956 |
+| Ball mAP50 | 0.943 |
+| Basket mAP50 | 0.979 |
+| Inference FPS | ~48 at imgsz=960 on RTX 4080 Super |
+
+**Classes:** `Ball`, `Ball_in_Basket`, `Player`, `Basket`, `Player_Shooting`
+
+This is the active model in `config.yaml`. Reproduce it with `python src/train.py`.
+
+---
+
+### SwishAI (alternative starting point)
+
+Open-weights basketball model trained on Roboflow datasets, `yolo11s` base.
+
+**GitHub:** https://github.com/sPappalard/SwishAI
+
+**Note:** The `.pt` weights are not included in the repo — only the training code
+is published. Would need to be trained from their scripts before use.
 
 **Classes:** `Ball`, `Ball in Basket`, `Player`, `Basket`, `Player Shooting`
 
-This is the only public repo found that packages trained basketball `.pt` weights
-without requiring a Roboflow paid plan.
-
-**GitHub:** https://github.com/sPappalard/SwishAI
-**Weights location:** `basketball_training/weights/best.pt`
-
-To use in this pipeline, download `best.pt` and update `config.yaml`:
-```yaml
-model:
-  weights: "store/weights/swishai_best.pt"
-  class_map:
-    0: "Ball"
-    1: "Ball in Basket"
-    2: "Player"
-    3: "Basket"
-    4: "Player Shooting"
-```
-
-**Caveat:** Trained on yolo11s, so slightly lower accuracy than yolo11m.
-Worth testing as a starting point before fine-tuning on your own footage.
+**Caveat:** `yolo11s` base — lower accuracy than our `yolo11m` fine-tune.
 
 ---
 
@@ -187,38 +191,42 @@ court markings are all distribution-shifted from the training data.
 3. Label those frames in Roboflow (free tier: up to 1,000 images/month)
 4. Export as YOLOv11 format and fine-tune:
 
+Place the dataset under `store/dataset/<name>/` and update `config.yaml`:
+```yaml
+training:
+  dataset: "store/dataset/<name>/data.yaml"
+  output_name: "basketball-ft-v2"
+```
+Then run:
 ```bash
-yolo detect train \
-  data=path/to/dataset/data.yaml \
-  model=yolo11m.pt \
-  epochs=50 \
-  imgsz=1280 \
-  device=0
+python src/train.py
 ```
 
-5. Put the resulting `best.pt` in `store/weights/` and update `config.yaml`
+5. After training, version the new weights: `dvc add store && dvc push && git add store.dvc && git commit`
 
 Even 200-300 labeled frames from your gym will meaningfully improve detection
 quality for your specific setup.
 
 ---
 
-## Recommended path forward
+## Current state and path forward
 
-1. **Start now:** Run `yolo11m.pt` (base COCO weights) against your test footage.
-   Good enough to see players and ball, assess tracking stability.
+**Done:**
+- Fine-tuned `yolo11m` on basketball-detection-srfkd (9,599 imgs) — 27.1% ball detection, mAP50=0.956
+- Scoring logic live: `Ball_in_Basket` detections drive score with 45-frame debounce
+- Weights DVC-tracked on the remote — `dvc pull` to restore
 
-2. **Quick win:** Download SwishAI's `best.pt` — already trained on basketball,
-   adds hoop detection and `Ball in Basket` class for shot detection.
+**Next:**
+1. **More data — your gym:** Run `pipeline_test.py --save-output` on real game footage.
+   Label frames where detection fails in Roboflow (free tier: 1,000 images/month).
+   Even 200–300 frames from your court will push ball detection well past 50%.
+   Use `python src/train.py` with the new dataset — fine-tuning from `basketball-ft.pt`
+   converges faster than starting from COCO.
 
-3. **Best ball/hoop accuracy:** Download the `basketball-and-net-detection` dataset
-   (5,482 images) and fine-tune `yolo11m.pt` on it. This is the highest-leverage
-   fine-tuning target before you have your own footage.
+2. **More data — additional datasets:** The `basketball-and-net-detection` dataset
+   (5,482 images, ball + hoop) on Roboflow Universe is the highest-leverage public
+   dataset to add next. Merge it with `basketball-srfkd` and retrain.
 
-4. **Occlusion issues?** Benchmark RF-DETR-S or RF-DETR-M on your test footage.
-   If track loss during screens/pile-ups is causing missed events, RF-DETR's
-   transformer attention is the strongest available alternative.
-
-5. **Endgame:** Label ~300 frames from your actual gym with your actual cameras.
-   Fine-tune on that. Your mileage from any of the above will plateau without
-   in-distribution training data.
+3. **Occlusion issues?** If ByteTrack loses players during screens and causes missed
+   events, benchmark RF-DETR-S or RF-DETR-M. Transformer attention handles heavy
+   occlusion better than YOLO's CNN backbone.
