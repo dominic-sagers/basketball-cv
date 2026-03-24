@@ -452,3 +452,116 @@ class VideoSourceFactory:
         raise ValueError(
             f"Unknown source type '{source_type}'. Expected: 'file', 'rtsp', or 'usb'."
         )
+
+
+# ---------------------------------------------------------------------------
+# Stream chunk recorder
+# ---------------------------------------------------------------------------
+
+class StreamChunkRecorder:
+    """
+    Records a live RTSP/HTTP stream to sequential fixed-duration chunk files on disk.
+
+    A background thread reads every frame from the stream and writes them to
+    chunk_{n:04d}.mp4 files. Completed chunk paths are placed on a queue for
+    the pipeline to consume at its own pace. This fully decouples capture from
+    inference — no frames are dropped due to slow processing, only disk write
+    speed is the limit (far faster than 720p @ 25 FPS).
+
+    Usage:
+        recorder = StreamChunkRecorder(url, chunk_dir, chunk_seconds=30)
+        chunk_queue = recorder.start()
+        while True:
+            chunk_path = chunk_queue.get(timeout=...)
+            if chunk_path is None:          # sentinel: stream ended
+                break
+            process(chunk_path)             # use FileVideoSource
+        recorder.stop()
+    """
+
+    def __init__(
+        self,
+        url: str,
+        chunk_dir: str,
+        chunk_seconds: float = 30.0,
+    ) -> None:
+        self._url = url
+        self._chunk_dir = Path(chunk_dir)
+        self._chunk_seconds = chunk_seconds
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._chunk_queue: queue.Queue[str | None] = queue.Queue()
+
+    def start(self) -> "queue.Queue[str | None]":
+        """Start the background recording thread. Returns the completed-chunk queue."""
+        self._chunk_dir.mkdir(parents=True, exist_ok=True)
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._record_loop,
+            name="stream-chunk-recorder",
+            daemon=True,
+        )
+        self._thread.start()
+        return self._chunk_queue
+
+    def stop(self) -> None:
+        """Signal recording to stop and wait for the current chunk to finalise."""
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=10.0)
+
+    def _record_loop(self) -> None:
+        cap = cv2.VideoCapture(self._url, cv2.CAP_FFMPEG)
+        if not cap.isOpened():
+            logger.error("[StreamChunkRecorder] Could not open stream: %s", self._url)
+            self._chunk_queue.put(None)
+            return
+
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        frames_per_chunk = max(1, int(fps * self._chunk_seconds))
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+
+        logger.info(
+            "[StreamChunkRecorder] %dx%d @ %.1f FPS | %.0fs chunks (%d frames each) → %s",
+            w, h, fps, self._chunk_seconds, frames_per_chunk, self._chunk_dir,
+        )
+
+        chunk_idx = 0
+        frame_in_chunk = 0
+        writer: cv2.VideoWriter | None = None
+        current_path: str | None = None
+
+        while not self._stop_event.is_set():
+            ok, frame = cap.read()
+            if not ok:
+                logger.info("[StreamChunkRecorder] Stream ended.")
+                break
+
+            if writer is None:
+                current_path = str(self._chunk_dir / f"chunk_{chunk_idx:04d}.mp4")
+                writer = cv2.VideoWriter(current_path, fourcc, fps, (w, h))
+                logger.info("[StreamChunkRecorder] Recording chunk %04d ...", chunk_idx)
+
+            writer.write(frame)
+            frame_in_chunk += 1
+
+            if frame_in_chunk >= frames_per_chunk:
+                writer.release()
+                writer = None
+                logger.info("[StreamChunkRecorder] Chunk %04d complete → queued", chunk_idx)
+                self._chunk_queue.put(current_path)
+                chunk_idx += 1
+                frame_in_chunk = 0
+                current_path = None
+
+        # Finalise any partial chunk
+        if writer is not None:
+            writer.release()
+            if frame_in_chunk > 0 and current_path:
+                logger.info("[StreamChunkRecorder] Final partial chunk %04d queued", chunk_idx)
+                self._chunk_queue.put(current_path)
+
+        cap.release()
+        self._chunk_queue.put(None)  # sentinel — recording done

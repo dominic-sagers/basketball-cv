@@ -19,6 +19,10 @@ openpyxl>=3.1.0          # Excel export
 
 # Scoreboard UI (Phase 1.5)
 pygame>=2.5.0            # Real-time overlay rendering
+PyQt6>=6.5.0             # Desktop app UI (app.py)
+
+# Privacy
+mediapipe>=0.10.0        # Face detection for face blur — falls back to OpenCV Haar if unavailable
 
 # Optional dependencies (uncomment if needed)
 # roboflow                # Access to basketball datasets for fine-tuning (not needed at runtime)

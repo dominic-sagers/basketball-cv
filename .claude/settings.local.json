@@ -22,7 +22,13 @@
       "Read(//c/Users/domin/AppData/Local/**)",
       "Bash(FFMPEG=\"C:/Users/domin/AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-8.1-full_build/bin/ffmpeg.exe\")",
       "Bash(py src/pipeline_test.py --file \"store/footage/basketball-cv-sample-5-on-5.mov\" --save-output \"store/output/5on5-annotated.mp4\" --save-log \"store/output/5on5-log.json\" --no-preview)",
-      "Bash(dvc remote:*)"
+      "Bash(dvc remote:*)",
+      "Bash(py -c \"import mediapipe as mp; fd = mp.solutions.face_detection.FaceDetection\\(\\); print\\(''MediaPipe OK''\\)\")",
+      "Bash(py -c \"import mediapipe as mp; print\\(dir\\(mp.tasks.vision\\)\\)\")",
+      "Bash(py -c \"from src.face_blur import FaceBlur; fb = FaceBlur\\(\\); print\\(''Backend:'', fb.backend, ''| Enabled:'', fb.enabled\\)\")",
+      "Bash(py -:*)",
+      "Bash(python -c \"import cv2; cap = cv2.VideoCapture\\(''F:/personal_repos/basketball-cv/store/footage/church-basketball-01/game_2_church.mp4''\\); print\\(''FPS:'', cap.get\\(cv2.CAP_PROP_FPS\\)\\); print\\(''Frames:'', cap.get\\(cv2.CAP_PROP_FRAME_COUNT\\)\\); cap.release\\(\\)\")",
+      "Bash(.venv/Scripts/python -c \"import cv2; cap = cv2.VideoCapture\\(''store/footage/church-basketball-01/game_2_church.mp4''\\); print\\(''FPS:'', cap.get\\(cv2.CAP_PROP_FPS\\)\\); print\\(''Frames:'', cap.get\\(cv2.CAP_PROP_FRAME_COUNT\\)\\); cap.release\\(\\)\")"
     ]
   }
 }

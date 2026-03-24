@@ -2,8 +2,9 @@
 
 ## Core dependencies
 
-### Python 3.11+
+### Python 3.11+ (3.13 tested ✓)
 Required for performance improvements and type hint support used throughout.
+Python 3.13.1 is the active version — note: use CUDA 12.4 PyTorch wheels (cu121 has no 3.13 wheels).
 
 ### Ultralytics YOLOv11
 ```
@@ -13,16 +14,14 @@ pip install ultralytics
 - CUDA-accelerated out of the box with PyTorch
 - Built-in multi-object tracking: `model.track(source, tracker="bytetrack.yaml")`
 - Model variants: use `yolo11m.pt` as the starting point (good speed/accuracy balance on 4080 Super)
-- Basketball-specific fine-tuned weights available on Roboflow Universe
+- Basketball-specific fine-tuned weights in `store/weights/basketball-ft.pt`
 
 ### OpenCV
 ```
 pip install opencv-python
 ```
-- Camera capture (VideoCapture)
-- Frame preprocessing (resize, denoise, ROI crop)
-- Court homography (perspectiveTransform)
-- Optional: overlay rendering if not using Pygame
+- Camera capture (VideoCapture), frame preprocessing, RTSP stream reading
+- **Important**: do not install `opencv-python-headless` alongside `opencv-python` — they conflict and the headless build wins, breaking `cv2.imshow`. If Roboflow (or another package) installs it automatically, uninstall it: `pip uninstall opencv-python-headless`
 
 ### PyTorch + CUDA
 ```
@@ -31,6 +30,21 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 - CUDA 12.4 build — required for Python 3.13 (cu121 has no 3.13 wheels)
 - Verify with: `torch.cuda.is_available()` and `torch.cuda.get_device_name(0)`
 
+### PyQt6
+```
+pip install PyQt6
+```
+- Desktop application framework for `src/app.py`
+- Provides layout engine, thread-safe signals (pipeline → UI), and proper widget toolkit
+- Used for: live video panel, score management, log output, start/stop control
+
+### ffmpeg (system install)
+- Required for chunk concatenation in stream-buffer mode
+- **Windows**: `winget install Gyan.FFmpeg` — auto-discovered in the winget install path if not on PATH
+- **Linux**: `sudo apt install ffmpeg` (Debian/Ubuntu) or `sudo dnf install ffmpeg` (Fedora)
+- **macOS**: `brew install ffmpeg`
+- The pipeline checks PATH first, then falls back to platform-specific install locations
+
 ### Pandas + openpyxl
 ```
 pip install pandas openpyxl
@@ -38,12 +52,12 @@ pip install pandas openpyxl
 - Phase 2 stat export to Excel
 - Install now to avoid dependency pain later
 
-### Pygame (Phase 1.5 scoreboard)
+### Pygame (Phase 1.5 overlay — superseded by PyQt6 app)
 ```
 pip install pygame
 ```
-- Lightweight overlay for scoreboard rendering
-- Runs in separate thread reading from GameState
+- Originally planned for scoreboard overlay; `src/app.py` (PyQt6) now serves this role
+- Still a dependency in `requirements.txt` for potential secondary overlay use
 
 ---
 
@@ -63,8 +77,6 @@ pip install rfdetr
 - DINOv2 vision transformer backbone — handles player occlusion better than CNN-based YOLO
 - Trade-off: ~20-25 FPS on T4 GPU at high accuracy; RTX 4080 Super is significantly faster
 - Not yet integrated — evaluate against test footage if ByteTrack loses tracks during screens
-- GitHub: https://github.com/roboflow/rf-detr
-- See `docs/models.md` for detailed comparison vs. YOLOv11
 
 ### Roboflow
 ```
@@ -73,6 +85,7 @@ pip install roboflow
 - Access to basketball-specific pretrained datasets for fine-tuning
 - See `docs/models.md` for the full dataset list with URLs and download instructions
 - Only needed if you fine-tune; not required at runtime
+- **Note**: Roboflow installs `opencv-python-headless` as a dependency — uninstall it after
 
 ### DVC
 ```
@@ -81,6 +94,12 @@ pip install "dvc[ssh]"
 - Data Version Control — tracks large files (weights, dataset, footage) separately from git
 - SSH remote over Tailscale — see `docs/dvc-setup.md` for setup and access
 - `store.dvc` committed to git; actual data pulled with `dvc pull`
+
+### IP Webcam (Android app — not a Python dep)
+- Streams phone camera as HTTP MJPEG or RTSP over the network
+- Used as live camera source during games
+- Connect via Tailscale: `http://<phone-tailscale-ip>:8080/video`
+- Recommended settings: 720p, 25 FPS, H.264, quality 50–60%
 
 ### OBS Studio (Phase 1.5, not a Python dep)
 - For projecting the scoreboard overlay to a second display or projector
@@ -98,28 +117,26 @@ print(torch.cuda.get_device_name(0))   # RTX 4080 SUPER
 print(torch.cuda.mem_get_info())       # should show ~16GB
 ```
 
-### Camera test
+### OpenCV conflict check
 ```python
 import cv2
-cap = cv2.VideoCapture(0)  # try 0, 1, 2 for each camera
-ret, frame = cap.read()
-print(ret, frame.shape)    # True, (1080, 1920, 3) or similar
+print(cv2.__version__)
+# verify cv2.imshow exists (headless build won't have it)
+print(hasattr(cv2, 'imshow'))  # must be True
 ```
 
 ### Inference speed benchmark
 ```python
 from ultralytics import YOLO
 import time
-model = YOLO("yolo11m.pt")
-# warm up
-model.predict("path/to/test_frame.jpg", device=0)
-# benchmark
+model = YOLO("store/weights/basketball-ft.pt")
+model.predict("store/footage/your_clip.mp4", device=0)  # warm up
 start = time.time()
 for _ in range(100):
-    model.predict("path/to/test_frame.jpg", device=0, verbose=False)
+    model.predict("store/footage/your_clip.mp4", device=0, verbose=False)
 print(f"{100 / (time.time() - start):.1f} FPS")
 ```
-Target: ≥60 FPS on a single 1080p frame with yolo11m.
+Target: ≥30 FPS on 720p with yolo11m at full player count.
 
 ---
 
@@ -133,19 +150,24 @@ source .venv/bin/activate  # Windows: .venv\Scripts\activate
 # 2. Install PyTorch with CUDA 12.4
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 
-# 3. Install all other dependencies (includes DVC)
+# 3. Install all other dependencies
 pip install -r requirements.txt
 
-# 4. Pull data — weights, dataset, footage (requires Tailscale + DVC remote access)
+# 4. Fix OpenCV conflict if Roboflow was installed
+pip uninstall opencv-python-headless -y
+
+# 5. Pull data — weights, dataset, footage (requires Tailscale + DVC remote access)
 # See docs/dvc-setup.md for access setup
 dvc pull
 
-# 5. Verify CUDA
+# 6. Verify CUDA
 python -c "import torch; print(torch.cuda.get_device_name(0))"
 
-# 6. Verify sources and pipeline
-python src/source_test.py --file store/footage/your_clip.mp4
+# 7. Run on a recorded file
 python src/pipeline_test.py --file store/footage/your_clip.mp4
+
+# 8. Launch the desktop app (requires phone streaming via IP Webcam + Tailscale)
+python src/app.py --rtsp http://<phone-tailscale-ip>:8080/video --chunk-seconds 5
 ```
 
 ---
@@ -192,10 +214,7 @@ tracking:
   track_buffer: 30
 
 event_logic:
-  rebound_proximity_px: 80
-  shot_downward_frames: 3
-  assist_possession_window: 5
-  block_hand_ball_dist_px: 40
+  shot_cooldown_frames: 45   # debounce window after a detected basket
 
 output:
   log_dir: "store/output/"

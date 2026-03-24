@@ -155,6 +155,28 @@ dvc push
 
 ---
 
+## Updating the store after a game session
+
+After a session where you've added footage, annotated outputs, or new weights:
+
+```bash
+# 1. Re-hash store/ and update the pointer file
+dvc add store
+
+# 2. Stage the updated pointer
+git add store.dvc
+
+# 3. Commit
+git commit -m "Update store: <brief description of what changed>"
+
+# 4. Push data to remote (make sure Tailscale is connected)
+dvc push
+```
+
+DVC only uploads files that have changed since the last push — it won't re-upload existing footage.
+
+---
+
 ## Collaborator onboarding
 
 Granting access requires two steps, both done from the **Tailscale admin console**:
