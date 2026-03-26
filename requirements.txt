@@ -21,8 +21,12 @@ openpyxl>=3.1.0          # Excel export
 pygame>=2.5.0            # Real-time overlay rendering
 PyQt6>=6.5.0             # Desktop app UI (app.py)
 
-# Privacy
-mediapipe>=0.10.0        # Face detection for face blur — falls back to OpenCV Haar if unavailable
+# Privacy / face blur (post-processing via blur_footage.py)
+sam2>=1.1.0              # SAM2 video predictor — pixel-precise face mask propagation
+transformers>=4.52.0     # SAM3 support (future upgrade path once Meta grants access)
+# insightface             # SCRFD detector (better than YOLOv8-face but requires MSVC on Windows)
+# Note: YOLOv8-face weights auto-downloaded from HuggingFace (arnabdhar/YOLOv8-Face-Detection)
+# Note: SAM2 weights auto-downloaded from HuggingFace (facebook/sam2.1-hiera-large) — not gated
 
 # Optional dependencies (uncomment if needed)
 # roboflow                # Access to basketball datasets for fine-tuning (not needed at runtime)

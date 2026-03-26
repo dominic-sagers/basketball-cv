@@ -1,42 +1,35 @@
 """
-blur_footage.py — post-process a video file to blur all faces / player heads.
+blur_footage.py — post-process a video to blur all faces using YOLOv8-face + SAM2.
 
-Runs independently of the CV pipeline — takes any video (raw or annotated)
-and outputs a new mp4 with heads blurred. Useful for sharing footage with
-the group after a game without exposing identities.
+YOLOv8-face detects face bounding boxes on keyframes; SAM2 propagates pixel-precise
+masks across all frames. No login or gated models required — both download automatically.
 
-Two modes:
+This is intentionally a post-processing step — run it on the annotated output
+from pipeline_test.py or app.py after a game session.
 
-  1. Player-box mode (--log, recommended): pass the JSON log produced by
-     `pipeline_test.py --save-log`. Uses stored tracker bounding boxes to blur
-     the top 35% of each player box. Works at any camera distance or angle.
-
-  2. Face-detector mode (default fallback): OpenCV DNN res10 SSD with Haar
-     cascade fallback. Only reliable for close, frontal faces — NOT recommended
-     for wide-angle gym footage.
+Setup (one-time, automatic on first run):
+    pip install sam2 ultralytics huggingface_hub
 
 Usage:
-    # Recommended: use tracker log for reliable head blur
-    python src/blur_footage.py store/footage/raw_game.mp4 \\
-        --log store/output/raw_game_log.json
+    # Blur all faces in an annotated game clip
+    python src/blur_footage.py store/output/2026-03-25_194841/game_camA.mp4
 
-    # Output to explicit path
-    python src/blur_footage.py store/output/5on5-annotated.mp4 \\
-        --log store/output/5on5-log.json \\
-        --output store/output/5on5-blurred.mp4
+    # Explicit output path
+    python src/blur_footage.py store/output/game.mp4 --output store/output/game_blurred.mp4
 
-    # Adjust blur strength (default 51 — strong; 31 = softer)
-    python src/blur_footage.py store/footage/raw_game.mp4 \\
-        --log store/output/raw_game_log.json --blur-strength 31
+    # Adjust blur intensity (default 51 — strong; 31 = softer)
+    python src/blur_footage.py store/output/game.mp4 --blur-strength 31
 
-    # Face-detector fallback (no log available)
-    python src/blur_footage.py store/footage/raw_game.mp4 --confidence 0.3
+    # Tune face detection sensitivity (lower = more faces, more false positives)
+    python src/blur_footage.py store/output/game.mp4 --face-conf 0.2
+
+    # Reduce chunk size if you run out of GPU memory (default: 120 frames)
+    python src/blur_footage.py store/output/game.mp4 --chunk-size 60
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sys
 import time
@@ -54,44 +47,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-_PLAYER_CLASSES = {"Player", "Player_Shooting", "person"}
-
-
-def _load_frame_boxes(log_path: str) -> dict[int, list[tuple[int, int, int, int]]]:
-    """
-    Load per-frame player bounding boxes from a pipeline JSON log.
-
-    Returns a dict mapping frame_number → list of (x1, y1, x2, y2) for players.
-    """
-    with open(log_path) as f:
-        data = json.load(f)
-
-    boxes: dict[int, list[tuple[int, int, int, int]]] = {}
-    for entry in data.get("frames", []):
-        frame_num = entry["frame"]
-        player_boxes = []
-        for obj in entry.get("objects", []):
-            if obj.get("class") in _PLAYER_CLASSES:
-                x1, y1, x2, y2 = [int(v) for v in obj["bbox"]]
-                player_boxes.append((x1, y1, x2, y2))
-        boxes[frame_num] = player_boxes
-
-    total_players = sum(len(v) for v in boxes.values())
-    logger.info(
-        "Log loaded: %d frames, %d total player detections",
-        len(boxes), total_players,
-    )
-    return boxes
-
 
 def blur_video(
     input_path: str,
     output_path: str,
     blur_strength: int,
-    confidence: float,
-    log_path: str | None = None,
-    head_fraction: float = 0.35,
+    face_conf: float,
+    face_imgsz: int,
+    chunk_size: int,
 ) -> None:
+    """Read input video, blur faces via YOLOv8-face + SAM2, write output."""
     cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():
         logger.error("Cannot open: %s", input_path)
@@ -102,56 +67,49 @@ def blur_video(
     w            = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h            = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
+    logger.info("Input : %s  (%dx%d @ %.1f fps, %d frames)", input_path, w, h, fps, total_frames)
+    logger.info("Output: %s", output_path)
+    logger.info("Chunk size: %d frames | blur kernel: %d | face conf: %.2f | face imgsz: %d",
+                chunk_size, blur_strength, face_conf, face_imgsz)
+
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(output_path, fourcc, fps, (w, h))
 
-    fb = FaceBlur(blur_strength=blur_strength, dnn_confidence=confidence)
+    fb = FaceBlur(
+        blur_strength=blur_strength,
+        face_conf=face_conf,
+        face_imgsz=face_imgsz,
+        chunk_size=chunk_size,
+    )
 
-    # Load tracker log if provided
-    frame_boxes: dict[int, list[tuple[int, int, int, int]]] | None = None
-    if log_path:
-        logger.info("Using player-box head blur from log: %s", log_path)
-        frame_boxes = _load_frame_boxes(log_path)
-    else:
-        logger.info("No log provided — using face detector backend: %s", fb.backend)
-        logger.warning(
-            "Face detector is unreliable for wide-angle gym footage. "
-            "Run pipeline_test.py with --save-log and pass the result via --log."
-        )
-
-    logger.info("Input : %s  (%dx%d, %.1f fps, %d frames)", input_path, w, h, fps, total_frames)
-    logger.info("Output: %s", output_path)
-
-    frame_num = 0
-    blurred_frames = 0
     t_start = time.perf_counter()
+    frame_num = 0
 
+    # Read and process in chunks so GPU memory stays bounded for long videos
     while True:
-        ok, frame = cap.read()
-        if not ok:
+        chunk_frames = []
+        for _ in range(chunk_size):
+            ok, frame = cap.read()
+            if not ok:
+                break
+            chunk_frames.append(frame)
+
+        if not chunk_frames:
             break
 
-        frame_num += 1
+        blurred = fb.blur_frames(chunk_frames)
+        for out_frame in blurred:
+            writer.write(out_frame)
 
-        if frame_boxes is not None:
-            boxes = frame_boxes.get(frame_num, [])
-            if boxes:
-                blurred_frames += 1
-            result = fb.blur_player_heads(frame, boxes, head_fraction=head_fraction)
-        else:
-            result = fb.process(frame)
-
-        writer.write(result)
-
-        if frame_num % 100 == 0 or frame_num == total_frames:
-            elapsed = time.perf_counter() - t_start
-            pct = 100 * frame_num / total_frames if total_frames else 0
-            fps_proc = frame_num / elapsed if elapsed > 0 else 0
-            eta = (total_frames - frame_num) / fps_proc if fps_proc > 0 else 0
-            logger.info(
-                "Frame %d/%d  (%.0f%%)  %.1f fps  ETA %.0fs",
-                frame_num, total_frames, pct, fps_proc, eta,
-            )
+        frame_num += len(chunk_frames)
+        elapsed = time.perf_counter() - t_start
+        pct = 100 * frame_num / total_frames if total_frames else 0
+        fps_proc = frame_num / elapsed if elapsed > 0 else 0
+        eta = (total_frames - frame_num) / fps_proc if fps_proc > 0 else 0
+        logger.info(
+            "Progress: %d/%d frames (%.0f%%)  %.1f fps  ETA %.0fs",
+            frame_num, total_frames, pct, fps_proc, eta,
+        )
 
     cap.release()
     writer.release()
@@ -161,17 +119,12 @@ def blur_video(
         "Done — %d frames in %.1fs (%.1f fps avg)",
         frame_num, elapsed, frame_num / elapsed if elapsed > 0 else 0,
     )
-    if frame_boxes is not None:
-        logger.info(
-            "Player heads blurred in %d/%d frames (%.0f%%)",
-            blurred_frames, frame_num,
-            100 * blurred_frames / frame_num if frame_num else 0,
-        )
+    logger.info("Saved to: %s", output_path)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Blur player heads / faces in a video file for privacy"
+        description="Blur faces in a video file using SAM3 segmentation"
     )
     parser.add_argument("input", help="Path to input video file")
     parser.add_argument(
@@ -179,20 +132,24 @@ def main() -> None:
         help="Output path (default: <input_stem>_blurred.mp4 alongside input)",
     )
     parser.add_argument(
-        "--log", metavar="PATH", default=None,
-        help="JSON log from pipeline_test.py --save-log (enables player-box head blur)",
-    )
-    parser.add_argument(
-        "--head-fraction", type=float, default=0.35, metavar="F",
-        help="Fraction of player box height to blur from top (default: 0.35)",
-    )
-    parser.add_argument(
         "--blur-strength", type=int, default=51, metavar="K",
         help="Gaussian kernel size — must be odd, larger = stronger blur (default: 51)",
     )
     parser.add_argument(
-        "--confidence", type=float, default=0.5, metavar="F",
-        help="DNN face detection confidence threshold 0–1 (fallback mode only, default: 0.5)",
+        "--face-conf", type=float, default=0.25, metavar="F",
+        help="YOLOv8-face detection confidence threshold (0–1, default: 0.25). "
+             "Lower values detect more faces but may increase false positives.",
+    )
+    parser.add_argument(
+        "--face-imgsz", type=int, default=1280, metavar="PX",
+        help="YOLO inference resolution in pixels (default: 1280, must be multiple of 32). "
+             "Higher values detect smaller/more distant faces at the cost of speed. "
+             "Try 1920 for court-depth faces.",
+    )
+    parser.add_argument(
+        "--chunk-size", type=int, default=120, metavar="N",
+        help="Frames per SAM2 video session (default: 120). "
+             "Reduce if you run out of GPU memory.",
     )
     args = parser.parse_args()
 
@@ -201,22 +158,17 @@ def main() -> None:
         logger.error("Input file not found: %s", input_path)
         sys.exit(1)
 
-    if args.log and not Path(args.log).exists():
-        logger.error("Log file not found: %s", args.log)
-        sys.exit(1)
-
-    if args.output:
-        output_path = args.output
-    else:
-        output_path = str(input_path.with_stem(input_path.stem + "_blurred").with_suffix(".mp4"))
+    output_path = args.output or str(
+        input_path.with_stem(input_path.stem + "_blurred").with_suffix(".mp4")
+    )
 
     blur_video(
         input_path=str(input_path),
         output_path=output_path,
         blur_strength=args.blur_strength,
-        confidence=args.confidence,
-        log_path=args.log,
-        head_fraction=args.head_fraction,
+        face_conf=args.face_conf,
+        face_imgsz=args.face_imgsz,
+        chunk_size=args.chunk_size,
     )
 
 

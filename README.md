@@ -5,6 +5,10 @@ Built for a weekly indoor pickup game — no official scoring, no jerseys, just 
 
 Runs locally on an RTX 4080 Super (16GB VRAM). No cloud, no internet dependency at game time.
 
+## Demo
+
+https://github.com/user-attachments/assets/7f8c7bc9-2876-44ff-992e-df60d2721fb2
+
 ---
 
 ## What it does (target)
