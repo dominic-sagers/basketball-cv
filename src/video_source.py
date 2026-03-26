@@ -27,7 +27,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import cv2
 import numpy as np
@@ -484,10 +484,14 @@ class StreamChunkRecorder:
         url: str,
         chunk_dir: str,
         chunk_seconds: float = 30.0,
+        preview_callback: "Callable[[np.ndarray], None] | None" = None,
+        preview_every: int = 3,
     ) -> None:
         self._url = url
         self._chunk_dir = Path(chunk_dir)
         self._chunk_seconds = chunk_seconds
+        self._preview_callback = preview_callback
+        self._preview_every = preview_every  # emit 1-in-N frames to the preview callback
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._chunk_queue: queue.Queue[str | None] = queue.Queue()
@@ -510,9 +514,32 @@ class StreamChunkRecorder:
         if self._thread is not None:
             self._thread.join(timeout=10.0)
 
+    # Consecutive read failures before attempting a full reconnect
+    _MAX_READ_FAILURES = 5
+    # Max reconnect attempts before giving up entirely
+    _MAX_RECONNECTS = 10
+    # Seconds to wait between reconnect attempts
+    _RECONNECT_DELAY = 2.0
+
+    def _open_capture(self) -> "cv2.VideoCapture | None":
+        """Open the stream, retrying up to _MAX_RECONNECTS times."""
+        for attempt in range(1, self._MAX_RECONNECTS + 1):
+            if self._stop_event.is_set():
+                return None
+            cap = cv2.VideoCapture(self._url, cv2.CAP_FFMPEG)
+            if cap.isOpened():
+                return cap
+            cap.release()
+            logger.warning(
+                "[StreamChunkRecorder] Connect attempt %d/%d failed — retrying in %.0fs …",
+                attempt, self._MAX_RECONNECTS, self._RECONNECT_DELAY,
+            )
+            time.sleep(self._RECONNECT_DELAY)
+        return None
+
     def _record_loop(self) -> None:
-        cap = cv2.VideoCapture(self._url, cv2.CAP_FFMPEG)
-        if not cap.isOpened():
+        cap = self._open_capture()
+        if cap is None:
             logger.error("[StreamChunkRecorder] Could not open stream: %s", self._url)
             self._chunk_queue.put(None)
             return
@@ -532,29 +559,87 @@ class StreamChunkRecorder:
         frame_in_chunk = 0
         writer: cv2.VideoWriter | None = None
         current_path: str | None = None
+        consecutive_failures = 0
+        total_dropped = 0
+        total_captured = 0
+        chunk_wall_start = time.perf_counter()
 
         while not self._stop_event.is_set():
             ok, frame = cap.read()
+
             if not ok:
-                logger.info("[StreamChunkRecorder] Stream ended.")
-                break
+                consecutive_failures += 1
+                total_dropped += 1
+                if consecutive_failures < self._MAX_READ_FAILURES:
+                    logger.debug(
+                        "[StreamChunkRecorder] Frame read failed (%d consecutive) — retrying …",
+                        consecutive_failures,
+                    )
+                    continue
+                # Too many in a row — reconnect
+                logger.warning(
+                    "[StreamChunkRecorder] %d consecutive read failures (total dropped: %d) "
+                    "— stream likely disconnected, reconnecting …",
+                    consecutive_failures, total_dropped,
+                )
+                cap.release()
+                cap = self._open_capture()
+                if cap is None:
+                    logger.error("[StreamChunkRecorder] Reconnect failed — giving up.")
+                    break
+                consecutive_failures = 0
+                logger.info("[StreamChunkRecorder] Reconnected — resuming recording.")
+                continue
+
+            consecutive_failures = 0
+            total_captured += 1
+
+            # Raw preview: forward a subsampled, half-res frame to the UI without
+            # opening a second network connection. ~negligible cost.
+            if self._preview_callback is not None and total_captured % self._preview_every == 0:
+                ph, pw = frame.shape[:2]
+                preview = cv2.resize(frame, (pw // 2, ph // 2)) if pw > 640 else frame
+                self._preview_callback(preview)
 
             if writer is None:
                 current_path = str(self._chunk_dir / f"chunk_{chunk_idx:04d}.mp4")
                 writer = cv2.VideoWriter(current_path, fourcc, fps, (w, h))
+                chunk_wall_start = time.perf_counter()
                 logger.info("[StreamChunkRecorder] Recording chunk %04d ...", chunk_idx)
 
             writer.write(frame)
             frame_in_chunk += 1
 
             if frame_in_chunk >= frames_per_chunk:
+                wall_elapsed = time.perf_counter() - chunk_wall_start
+                actual_fps = frames_per_chunk / wall_elapsed if wall_elapsed > 0 else 0.0
+                pct = 100.0 * actual_fps / fps
+
+                if actual_fps < fps * 0.85:
+                    logger.warning(
+                        "[StreamChunkRecorder] Chunk %04d: stream delivered %.1f FPS "
+                        "(%.0f%% of %.0f FPS target, took %.1fs for %.0fs of footage) "
+                        "— network congestion or weak WiFi signal",
+                        chunk_idx, actual_fps, pct, fps, wall_elapsed, self._chunk_seconds,
+                    )
+                else:
+                    logger.info(
+                        "[StreamChunkRecorder] Chunk %04d complete → queued  (%.1f FPS, %.1fs wall)",
+                        chunk_idx, actual_fps, wall_elapsed,
+                    )
+
                 writer.release()
                 writer = None
-                logger.info("[StreamChunkRecorder] Chunk %04d complete → queued", chunk_idx)
                 self._chunk_queue.put(current_path)
                 chunk_idx += 1
                 frame_in_chunk = 0
                 current_path = None
+
+        if total_dropped:
+            logger.warning(
+                "[StreamChunkRecorder] Session ended — %d frames dropped by network across all chunks",
+                total_dropped,
+            )
 
         # Finalise any partial chunk
         if writer is not None:

@@ -29,6 +29,7 @@ import argparse
 import logging
 import sys
 import threading
+from datetime import datetime
 from pathlib import Path
 
 import cv2
@@ -91,11 +92,12 @@ class PipelineWorker(QThread):
     watches Team B's basket.
     """
 
-    frame_ready    = pyqtSignal(object)     # numpy BGR frame
-    score_event    = pyqtSignal(str, int)   # (team "A"|"B", points)
-    fps_updated    = pyqtSignal(float)
-    status_changed = pyqtSignal(str)
-    finished       = pyqtSignal(str)        # final output path or ""
+    frame_ready     = pyqtSignal(object)     # numpy BGR annotated frame
+    raw_frame_ready = pyqtSignal(object)     # numpy BGR raw stream frame (subsampled)
+    score_event     = pyqtSignal(str, int)   # (team "A"|"B", points)
+    fps_updated     = pyqtSignal(float)
+    status_changed  = pyqtSignal(str)
+    finished        = pyqtSignal(str)        # final output path or ""
 
     def __init__(
         self,
@@ -199,6 +201,7 @@ class PipelineWorker(QThread):
             url=self._rtsp_url,
             chunk_dir=cam_chunk_dir,
             chunk_seconds=self._chunk_seconds,
+            preview_callback=lambda f: self.raw_frame_ready.emit(f),
         )
         chunk_queue = recorder.start()
         self.status_changed.emit(
@@ -507,16 +510,21 @@ class BasketballApp(QMainWindow):
         top = QHBoxLayout()
         top.setSpacing(10)
 
-        # Video area: one or two panels side by side
+        # Video area: panels side by side
+        # Single-cam: [raw stream | processed]
+        # Dual-cam:   [cam A processed | cam B processed]  (raw hidden to save space)
         video_area = QHBoxLayout()
         video_area.setSpacing(6)
-        self._video_a = VideoPanel("A (Team A)")
-        self._video_b = VideoPanel(f"B (Team {self._camera2_team})")
+        self._video_raw_a = VideoPanel("A (Live)")
+        self._video_a     = VideoPanel("A (Processed)")
+        self._video_b     = VideoPanel(f"B (Processed)")
+        video_area.addWidget(self._video_raw_a)
         video_area.addWidget(self._video_a)
         video_area.addWidget(self._video_b)
-        # Hide Camera B panel until a second URL is provided
-        if not self._rtsp_url2:
-            self._video_b.hide()
+        if self._rtsp_url2:
+            self._video_raw_a.hide()   # dual-cam: no room for raw panel
+        else:
+            self._video_b.hide()       # single-cam: hide unused cam B slot
 
         video_widget = QWidget()
         video_widget.setLayout(video_area)
@@ -576,17 +584,13 @@ class BasketballApp(QMainWindow):
 
     # ── Pipeline control ────────────────────────────────────────────────────
 
-    def _make_worker(self, url: str, team: str, save_suffix: str) -> PipelineWorker:
-        save = None
-        if self._save_output:
-            p = Path(self._save_output)
-            save = str(p.with_stem(f"{p.stem}{save_suffix}")) if save_suffix else self._save_output
+    def _make_worker(self, url: str, team: str, save_output: str | None, chunk_dir: str) -> PipelineWorker:
         w = PipelineWorker(
             cfg=self._cfg,
             rtsp_url=url,
             chunk_seconds=self._chunk_seconds,
-            chunk_dir=self._chunk_dir,
-            save_output=save,
+            chunk_dir=chunk_dir,
+            save_output=save_output,
             camera_team=team,
         )
         w.score_event.connect(self._on_score_event)
@@ -601,16 +605,36 @@ class BasketballApp(QMainWindow):
 
         self._workers_done = 0
 
+        # Each run gets its own timestamped directory so nothing is overwritten.
+        # Output layout:
+        #   store/output/2026-03-25_194841/game.mp4        (single cam)
+        #   store/output/2026-03-25_194841/game_camA.mp4   (dual cam, suffixed by worker)
+        #   store/output/2026-03-25_194841/game_camB.mp4
+        #   store/output/2026-03-25_194841/chunks/camA/    (raw stream chunks, deleted after concat)
+        run_id = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+
+        if self._save_output:
+            run_dir = Path(self._save_output).parent / run_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+            run_save = str(run_dir / Path(self._save_output).name)
+        else:
+            run_save = None
+
+        run_chunks = str(Path(self._chunk_dir) / run_id)
+        logger.info("Run ID: %s", run_id)
+
         # Camera A — always present
-        self._worker = self._make_worker(self._rtsp_url, "A", "")
+        self._worker = self._make_worker(self._rtsp_url, "A", run_save, run_chunks)
         self._worker.frame_ready.connect(self._video_a.update_frame)
+        if not self._rtsp_url2:
+            self._worker.raw_frame_ready.connect(self._video_raw_a.update_frame)
         self._worker.finished.connect(self._on_worker_finished)
         self._worker.start()
 
         # Camera B — only if a second URL was provided
         if self._rtsp_url2:
             self._video_b.show()
-            self._worker2 = self._make_worker(self._rtsp_url2, self._camera2_team, "_camB")
+            self._worker2 = self._make_worker(self._rtsp_url2, self._camera2_team, run_save, run_chunks)
             self._worker2.frame_ready.connect(self._video_b.update_frame)
             self._worker2.finished.connect(self._on_worker_finished)
             self._worker2.start()
