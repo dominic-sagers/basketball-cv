@@ -45,9 +45,22 @@ Goal: display a live scoreboard during the game, either projected or on a second
 - [x] Desktop app UI — `src/app.py` (PyQt6): live preview, score panel, log panel, start/stop control
 - [x] Live score display with manual +1/+2/+3/−1 adjustment buttons per team
 - [x] Pipeline reads from `GameState` in real time — no coupling to CV internals
-- [x] Dual-camera architecture implemented: Camera A → Team A basket, Camera B → Team B basket
+- [x] Dual-camera architecture: Camera A → Team A basket, Camera B → Team B basket
+- [x] Raw RTSP preview panel alongside annotated output (single-cam mode)
+- [x] Per-run timestamped output directories — each session saved to a unique folder
+- [x] Stream health monitoring — warns when actual FPS drops below 85% of expected
+- [x] Linux compatibility — terminal quit watcher, ffmpeg path discovery, font fallbacks
 - [ ] Optional: shot clock countdown
 - [ ] OBS Studio integration for projector output (optional)
+
+---
+
+## Privacy — Face blur ✓ (post-processing)
+
+- [x] `face_blur.py` — YOLOv8-face detects faces on keyframes; SAM2 propagates pixel-precise masks across all frames; Gaussian blur applied only to face pixels
+- [x] `blur_footage.py` — CLI to post-process any recorded video: `python src/blur_footage.py game.mp4`
+- [x] Tunable sensitivity: `--face-imgsz` (higher = catches distant faces), `--face-conf`, `--blur-strength`
+- [x] Chunked processing — GPU memory stays bounded for long videos
 
 ---
 

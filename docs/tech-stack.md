@@ -52,6 +52,16 @@ pip install pandas openpyxl
 - Phase 2 stat export to Excel
 - Install now to avoid dependency pain later
 
+### SAM2 + YOLOv8-face (face blur — post-processing)
+```
+pip install sam2 ultralytics huggingface_hub
+```
+- **SAM2** (`facebook/sam2.1-hiera-large`) — pixel-precise face mask propagation across video chunks; auto-downloads from HuggingFace, not gated
+- **YOLOv8-face** (`arnabdhar/YOLOv8-Face-Detection`) — detects face bounding boxes on keyframes; weights auto-downloaded from HuggingFace
+- Used by `src/face_blur.py` and `src/blur_footage.py` for post-game privacy blur
+- Not needed at runtime during a game — only for post-processing recorded footage
+- Note: `sam2` package requires Linux or WSL2 for the Triton kernel; on Windows run inside Docker or WSL2
+
 ### Pygame (Phase 1.5 overlay — superseded by PyQt6 app)
 ```
 pip install pygame
@@ -114,7 +124,8 @@ pip install "dvc[ssh]"
 import torch
 print(torch.cuda.is_available())       # must be True
 print(torch.cuda.get_device_name(0))   # RTX 4080 SUPER
-print(torch.cuda.mem_get_info())       # should show ~16GB
+print(torch.cuda.mem_get_info())       # should show ~16GB total
+# Hardware: i7-14700K, RTX 4080 Super 16GB, 32GB RAM, Windows 11
 ```
 
 ### OpenCV conflict check
@@ -166,8 +177,11 @@ python -c "import torch; print(torch.cuda.get_device_name(0))"
 # 7. Run on a recorded file
 python src/pipeline_test.py --file store/footage/your_clip.mp4
 
-# 8. Launch the desktop app (requires phone streaming via IP Webcam + Tailscale)
+# 8. Launch the desktop app (requires phone running IP Webcam + Tailscale connected)
 python src/app.py --rtsp http://<phone-tailscale-ip>:8080/video --chunk-seconds 5
+
+# 9. (Optional) Post-process recorded footage to blur faces
+python src/blur_footage.py store/output/game.mp4 --face-imgsz 1920
 ```
 
 ---

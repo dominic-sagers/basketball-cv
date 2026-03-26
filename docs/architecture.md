@@ -75,7 +75,7 @@
 - **`PipelineWorker(QThread)`** — runs `StreamChunkRecorder` + `run_pipeline` in a background thread; emits Qt signals for frames, score events, FPS, status
 - **`ScorePanel`** — live score display with manual +1/+2/+3/−1 adjustment buttons per team
 - **`ControlPanel`** — Start / Stop+Save buttons, live status and FPS display
-- **`VideoPanel`** — displays annotated frames from `frame_callback` without a cv2 window
+- **`VideoPanel`** — displays frames from `frame_callback` without a cv2 window; in single-cam mode shows both raw RTSP preview and annotated output side by side
 - **`LogPanel`** — scrolling log widget capturing all Python logging output via `_QtLogHandler`
 - **Dual-camera support**: `--rtsp2 URL` adds Camera B; both workers run in parallel, each with its own `GameState`; `camera_team` parameter routes score events to the correct team; Camera B panel hidden until second URL is provided
 - **Score ownership**: `BasketballApp` holds the authoritative `_score` dict; all score changes (auto detection + manual buttons) flow through `_apply_score(team, delta)`
@@ -93,15 +93,19 @@ python src/app.py --rtsp http://<url>/video --chunk-seconds 5 --save-output stor
 ```
 
 ### `src/face_blur.py`
-- `FaceBlur` class with two backends: OpenCV DNN res10 SSD (primary) → Haar cascade fallback
-- `blur_player_heads(frame, player_boxes)` — blurs the upper 30% of each player bounding box (head region); reliable at any camera angle and distance, uses existing tracker output
-- `process(frame)` — falls back to face detector if no tracker boxes available
-- Auto-downloads DNN model weights to `store/weights/face/` on first use
+- `FaceBlur` class: YOLOv8-face (`arnabdhar/YOLOv8-Face-Detection`) detects face bounding boxes on keyframes; SAM2 (`facebook/sam2.1-hiera-large`) propagates pixel-precise face masks across all frames; Gaussian blur applied only to masked pixels
+- Both models auto-download from HuggingFace on first use — no login or gated access required
+- `blur_frames(frames)` — processes a list of BGR frames in fixed-size chunks; returns blurred frames
+- Frames are downscaled to ≤1024px for SAM2 I/O (SAM2's native resolution), masks upscaled back for full-res blur output
+- `--face-imgsz` controls YOLO inference resolution (default 1280; use 1920 for distant/small faces)
+- `--face-conf` controls detection confidence threshold (default 0.25; lower catches more faces)
+- Intentionally a post-processing tool — SAM2 requires batched video input, not per-frame inference
 
 ### `src/blur_footage.py`
-- Standalone post-processing script: reads any recorded video, outputs a face-blurred mp4
-- Uses `FaceBlur.blur_player_heads` with bounding boxes re-derived from the tracker
-- Usage: `python src/blur_footage.py input.mp4 --output output_blurred.mp4`
+- CLI wrapper around `FaceBlur` for post-processing recorded video files
+- Usage: `python src/blur_footage.py input.mp4 [--output out.mp4] [--face-imgsz 1920] [--face-conf 0.1] [--blur-strength 51] [--chunk-size 120]`
+- Reads video in chunks, passes each chunk to `FaceBlur.blur_frames()`, writes output mp4
+- Progress and ETA logged per chunk; output saved to `<input_stem>_blurred.mp4` by default
 
 ### `src/train.py`
 - Reads all training params from `config.yaml → training:`

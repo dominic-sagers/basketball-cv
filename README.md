@@ -3,7 +3,7 @@
 Real-time basketball stat tracking and scoreboard system using computer vision.
 Built for a weekly indoor pickup game — no official scoring, no jerseys, just hoops.
 
-Runs locally on an RTX 4080 Super (16GB VRAM). No cloud, no internet dependency at game time.
+Runs locally on an RTX 4080 Super (16GB VRAM). Cameras stream over Tailscale from Android phones at the gym to the desktop at home — no cloud, no internet dependency beyond the VPN tunnel.
 
 ## Demo
 
@@ -13,40 +13,84 @@ https://github.com/user-attachments/assets/7f8c7bc9-2876-44ff-992e-df60d2721fb2
 
 ## What it does (target)
 
-- Detects players, ball, and hoop from 2 fixed cameras — one per basket
+- Detects players, ball, and hoop from 2 phone cameras — one per basket
+- Streams live from the gym to a home desktop over Tailscale VPN
 - Tracks every player and the ball frame-to-frame with persistent IDs (ByteTrack)
 - Detects basketball events: made shots, rebounds, blocks, assists, turnovers
 - Aggregates stats at the **team level** (Phase 1) — no player identity needed yet
-- Displays a live scoreboard overlay on a second monitor or projector (Phase 1.5)
+- Displays a live scoreboard in a desktop app (PyQt6) with manual score adjustment
+- Post-processes recorded footage to blur faces for privacy (YOLOv8-face + SAM2)
 - Exports per-player stats to Excel after the game (Phase 2)
 
 ---
 
-## Current state (Phase 1 — in progress)
+## How it's used
 
-### Done
-- [x] `video_source.py` — file / RTSP (threaded, auto-reconnect) / USB camera abstraction
+A typical game session:
+
+1. **At the gym** — two Android phones running [IP Webcam](https://play.google.com/store/apps/details?id=com.pas.webcam) are positioned behind each basket, connected to Tailscale
+2. **At home** — the desktop app connects to both phone streams over Tailscale and runs the full CV pipeline in real time
+3. **After the game** — recorded footage is post-processed with `blur_footage.py` to blur all faces before sharing
+
+```bash
+# Launch the desktop app — single camera
+python src/app.py --rtsp http://<phone-tailscale-ip>:8080/video --chunk-seconds 5
+
+# Dual camera (one per basket)
+python src/app.py --rtsp http://<camA-ip>:8080/video --rtsp2 http://<camB-ip>:8080/video --chunk-seconds 5
+
+# With output saved (auto-concatenated on stop)
+python src/app.py --rtsp http://<camA-ip>:8080/video --save-output store/output/game.mp4
+
+# Post-process recorded footage to blur faces
+python src/blur_footage.py store/output/game.mp4
+
+# Adjust face detection sensitivity (higher imgsz catches far-away faces)
+python src/blur_footage.py store/output/game.mp4 --face-imgsz 1920 --face-conf 0.1
+```
+
+---
+
+## Current state
+
+### Phase 1 — Player-agnostic tracking (in progress)
+
+**Done**
+- [x] `video_source.py` — file / RTSP (threaded, auto-reconnect) / USB camera abstraction; `StreamChunkRecorder` captures live streams to chunk files so no frames are dropped
 - [x] `detector.py` — YOLOv11 inference → typed `Detection` objects
 - [x] `tracker.py` — ByteTrack via `model.track(persist=True)` → typed `Track` objects
 - [x] `visualizer.py` — bounding boxes, track IDs, fading ball trail, score overlay, FPS panel
-- [x] `game_state.py` — score tracking, Ball_in_Basket detection, 45-frame shot debounce
+- [x] `game_state.py` — score tracking, `Ball_in_Basket` detection, 45-frame shot debounce
 - [x] `pipeline_test.py` — full source → detect/track → score → visualize loop with `--save-output` / `--save-log`
 - [x] `train.py` — reads all training params from `config.yaml`; swap dataset in one line
 - [x] `config.yaml` — all thresholds, source types, paths, and training params; nothing hardcoded
 - [x] Docker setup with CUDA 12.4 support (GPU passthrough, camera mounts)
 - [x] `store/` — single DVC-tracked directory for all large assets (weights, dataset, footage, output)
-- [x] DVC initialised — `store.dvc` committed; SSH remote setup documented in `docs/dvc-setup.md`
+- [x] DVC over Tailscale SSH — `store.dvc` committed; setup documented in `docs/dvc-setup.md`
 - [x] Base model benchmarked: 14.8% ball detection, 48.5 FPS at imgsz=960 (`yolo11m.pt` COCO)
 - [x] Fine-tuned on Roboflow basketball dataset (9,599 imgs, 5 classes) — **27.1% ball detection, mAP50=0.956**
 - [x] Multi-dataset support — each dataset in `store/dataset/<name>/`; active dataset set in `config.yaml`
 - [x] Test footage recorded at gym-approximated angles
 
-### Up next
-- [ ] DVC remote configured on Ubuntu server (`dvc push` / `dvc pull` for weights + dataset)
+**Up next**
 - [ ] `preprocessor.py` — court ROI crop, resize, denoise
 - [ ] `ball_tracker.py` — ball trajectory analysis, hoop zone entry detection
 - [ ] `pose_estimator.py` — YOLOv11-pose for block/rebound detection
 - [ ] `event_logic.py` — basketball rules engine (rebound, assist, block, turnover)
+- [ ] Court homography: map camera pixels to court coordinates
+
+### Phase 1.5 — Real-time scoreboard overlay ✓
+
+- [x] `app.py` — PyQt6 desktop app: live video preview (raw + annotated), score panel, log panel, start/stop
+- [x] Live score with manual +1/+2/+3/−1 adjustment buttons per team
+- [x] Dual-camera support — Camera A → Team A basket, Camera B → Team B basket
+- [x] Raw RTSP preview panel alongside the annotated output (single-cam mode)
+- [x] Per-run timestamped output directories — each session saved separately
+- [x] Stream health monitoring — warns on dropped frames / poor connection
+
+### Privacy
+
+- [x] `face_blur.py` + `blur_footage.py` — post-processing face blur using YOLOv8-face detection + SAM2 pixel-precise segmentation. Detects faces on keyframes, propagates masks across all frames, applies Gaussian blur only to face pixels. Handles distant court faces via `--face-imgsz`.
 
 See [`docs/roadmap.md`](docs/roadmap.md) for the full phase breakdown.
 
@@ -63,11 +107,14 @@ basketball-cv/
 ├── docker-compose.yml
 │
 ├── src/
-│   ├── video_source.py      # FileVideoSource / RTSPVideoSource / USBCameraSource
+│   ├── app.py               # PyQt6 desktop app — primary interface for live games
+│   ├── video_source.py      # FileVideoSource / RTSPVideoSource / USBCameraSource / StreamChunkRecorder
 │   ├── detector.py          # YOLOv11 inference → Detection dataclass
 │   ├── tracker.py           # ByteTrack → Track dataclass (persistent IDs)
 │   ├── visualizer.py        # annotated frame rendering (boxes, trail, score, FPS panel)
 │   ├── game_state.py        # score, event log, shot debouncing
+│   ├── face_blur.py         # YOLOv8-face + SAM2 face segmentation and blur
+│   ├── blur_footage.py      # CLI: post-process a recorded video to blur all faces
 │   │
 │   ├── train.py             # fine-tune YOLOv11 from config.yaml (swap dataset in one line)
 │   ├── pipeline_test.py     # end-to-end test: source → detect/track → score → visualize
@@ -78,7 +125,7 @@ basketball-cv/
 ├── store/                   # DVC-tracked (gitignored) — run: dvc pull
 │   ├── footage/             # test video files
 │   ├── weights/             # fine-tuned .pt files + training run artifacts
-│   ├── output/              # annotated clips, game logs, frame logs
+│   ├── output/              # annotated clips, game logs (one subdirectory per run)
 │   └── dataset/             # one subdirectory per dataset
 │       └── basketball-srfkd/    # Roboflow basketball-detection-srfkd (9,599 imgs)
 │
@@ -109,7 +156,7 @@ pip install -r requirements.txt
 ### 2. Pull data (weights + dataset + footage)
 
 ```bash
-# Configure your DVC SSH credentials first — see docs/dvc-setup.md
+# Requires Tailscale connection to the DVC remote — see docs/dvc-setup.md
 dvc pull
 ```
 
@@ -122,16 +169,35 @@ python src/detection_test.py
 # Expected: RTX 4080 SUPER, ≥60 FPS on synthetic 1080p frames
 ```
 
-### 4. Run the pipeline
+### 4. Run the desktop app (live game)
+
+```bash
+# Phone streaming via IP Webcam over Tailscale
+python src/app.py --rtsp http://<phone-tailscale-ip>:8080/video --chunk-seconds 5
+```
+
+The app shows a raw preview and annotated output side by side, with live score management and a log panel.
+
+### 5. Run on a pre-recorded file
 
 ```bash
 python src/pipeline_test.py --file store/footage/your_clip.mp4
 ```
 
-Keyboard shortcuts in the preview window:
-- `Q` — quit
+### 6. Blur faces in recorded footage
 
-### 5. Useful flags
+```bash
+# Basic (auto-downloads YOLOv8-face + SAM2 on first run)
+python src/blur_footage.py store/output/game.mp4
+
+# Higher sensitivity for far-away faces
+python src/blur_footage.py store/output/game.mp4 --face-imgsz 1920
+
+# Tune all options
+python src/blur_footage.py store/output/game.mp4 --face-imgsz 1920 --face-conf 0.1 --chunk-size 60
+```
+
+### 7. Useful pipeline flags
 
 ```bash
 # Detection only (no tracking) — good for calibrating confidence threshold
@@ -143,17 +209,14 @@ python src/pipeline_test.py --file store/footage/clip.mp4 --playback-speed 0.25
 # Save annotated output clip
 python src/pipeline_test.py --file store/footage/clip.mp4 --save-output store/output/annotated.mp4
 
-# Save per-frame detection log as JSON
-python src/pipeline_test.py --file store/footage/clip.mp4 --no-preview --save-log store/output/log.json
-
 # Headless (no window — Docker or SSH)
 python src/pipeline_test.py --file store/footage/clip.mp4 --no-preview
 
-# Live RTSP stream
-python src/pipeline_test.py --rtsp rtsp://192.168.1.100:554/stream
+# Live RTSP stream (buffered — no dropped frames)
+python src/pipeline_test.py --rtsp http://<phone-ip>:8080/video --stream-buffer --chunk-seconds 5
 ```
 
-### 6. Docker
+### 8. Docker
 
 ```bash
 docker-compose build
@@ -185,25 +248,35 @@ See [`docs/training.md`](docs/training.md) for dataset layout, adding new datase
 
 ## Camera setup
 
-### Current plan (2 cameras)
+### Current setup (phones over Tailscale)
 
 ```
-[Cam 1]                        [Cam 2]
-~8-10ft up                     ~8-10ft up
-behind basket 1 (Team A end)   behind basket 2 (Team B end)
+[Phone A — IP Webcam]          [Phone B — IP Webcam]
+Tailscale IP                   Tailscale IP
+behind basket (Team A end)     behind basket (Team B end)
+        │                               │
+        └───────────── Tailscale VPN ───┘
+                            │
+                    [Desktop — RTX 4080 Super]
+                    running app.py
 ```
 
-Each camera covers its own basket for shot detection. Future: halfcourt overhead camera for full-court tracking.
+Phones stream MJPEG/H.264 over Tailscale to the desktop. `StreamChunkRecorder` captures each stream to local chunk files; the pipeline processes them sequentially at its own pace — every frame is preserved even if inference is slower than the stream rate.
 
-### Video source types (config.yaml)
+### Recommended phone settings (IP Webcam)
+
+- Resolution: 720p (1080p if signal is strong)
+- FPS: 25
+- Encoder: H.264
+- Quality: 50–60%
+
+### Video source types (`config.yaml`)
 
 | Type | Use case | Config key |
 |---|---|---|
+| `rtsp` / `http` | Live phone streams at the gym | `url:` |
 | `file` | Pre-recorded test footage | `path:` |
-| `rtsp` | Live network cameras at the gym | `url:` |
 | `usb`  | Direct USB cameras on the host | `index:` |
-
-Switch between types by editing `config.yaml` — no code changes needed.
 
 ---
 
@@ -223,10 +296,11 @@ Weights live in `store/weights/` (DVC-tracked). Pull via `dvc pull` or reproduce
 | Component | Spec |
 |---|---|
 | GPU | NVIDIA RTX 4080 Super (16GB VRAM) |
-| CPU | Intel i7-10700K |
+| CPU | Intel i7-14700K |
 | RAM | 32GB |
-| OS | Windows 11 / WSL2 for Docker |
-| Cameras | TBD — targeting 1080p @ 30fps |
+| OS | Windows 11 |
+| Cameras | Android phones running IP Webcam (1080p / 720p @ 25fps) |
+| Networking | Tailscale VPN — gym phones → home desktop |
 
 ---
 
