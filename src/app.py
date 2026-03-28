@@ -42,7 +42,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject
 from PyQt6.QtGui import QImage, QPixmap, QFont
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QTextEdit, QGroupBox, QSizePolicy,
 )
 
@@ -479,33 +479,56 @@ class ControlPanel(QGroupBox):
 # Video panel
 # ---------------------------------------------------------------------------
 
-class VideoPanel(QLabel):
-    """Displays annotated video frames with a team label overlay."""
+class VideoPanel(QWidget):
+    """
+    Video feed panel with a persistent label bar above the frame.
 
-    def __init__(self, team_label: str = "") -> None:
+    The label is always visible regardless of stream state, making it
+    easy to identify each panel in single-cam and dual-cam layouts.
+    """
+
+    def __init__(self, label: str = "") -> None:
         super().__init__()
-        self._team_label = team_label
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.setMinimumSize(320, 180)
-        self._show_placeholder()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-    def _show_placeholder(self) -> None:
-        label = f"Camera {self._team_label}\nNo stream" if self._team_label else "No stream"
-        self.setText(label)
-        self.setStyleSheet("background:#111; color:#444; font-size:14px; border:1px solid #333; border-radius:4px;")
+        # Persistent title bar — always visible
+        self._title = QLabel(label.upper())
+        self._title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._title.setFixedHeight(22)
+        self._title.setStyleSheet(
+            "background:#2a2a2a; color:#888; font-size:10px; font-weight:bold; "
+            "padding:3px; border:1px solid #333; border-radius:4px 4px 0 0;"
+        )
+
+        # Video area
+        self._video = QLabel()
+        self._video.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._video.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._video.setMinimumSize(280, 160)
+        self._video.setText("No stream")
+        self._video.setStyleSheet(
+            "background:#111; color:#444; font-size:13px; "
+            "border:1px solid #333; border-top:none; border-radius:0 0 4px 4px;"
+        )
+
+        layout.addWidget(self._title)
+        layout.addWidget(self._video, stretch=1)
 
     def update_frame(self, frame: np.ndarray) -> None:
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
         qimg = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888)
         pixmap = QPixmap.fromImage(qimg).scaled(
-            self.width(), self.height(),
+            self._video.width(), self._video.height(),
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
-        self.setPixmap(pixmap)
-        self.setStyleSheet("background:#000; border:1px solid #333; border-radius:4px;")
+        self._video.setPixmap(pixmap)
+        self._video.setStyleSheet(
+            "background:#000; border:1px solid #333; border-top:none; border-radius:0 0 4px 4px;"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -587,24 +610,42 @@ class BasketballApp(QMainWindow):
         top = QHBoxLayout()
         top.setSpacing(10)
 
-        # Video area: panels side by side
-        # Single-cam: [raw stream | processed]
-        # Dual-cam:   [cam A processed | cam B processed]  (raw hidden to save space)
-        video_area = QHBoxLayout()
-        video_area.setSpacing(6)
-        self._video_raw_a = VideoPanel("A (Live)")
-        self._video_a     = VideoPanel("A (Processed)")
-        self._video_b     = VideoPanel(f"B (Processed)")
-        video_area.addWidget(self._video_raw_a)
-        video_area.addWidget(self._video_a)
-        video_area.addWidget(self._video_b)
-        if self._rtsp_url2:
-            self._video_raw_a.hide()   # dual-cam: no room for raw panel
-        else:
-            self._video_b.hide()       # single-cam: hide unused cam B slot
+        cam2_team = self._camera2_team  # "A" or "B"
+
+        # Build all four panels with descriptive persistent labels
+        self._video_raw_a = VideoPanel(f"Cam 1  ·  Team A  ·  Live")
+        self._video_a     = VideoPanel(f"Cam 1  ·  Team A  ·  Processed")
+        self._video_raw_b = VideoPanel(f"Cam 2  ·  Team {cam2_team}  ·  Live")
+        self._video_b     = VideoPanel(f"Cam 2  ·  Team {cam2_team}  ·  Processed")
 
         video_widget = QWidget()
-        video_widget.setLayout(video_area)
+
+        if self._rtsp_url2:
+            # Dual-cam: 2×2 grid — full raw+processed for each camera
+            #   [Cam 1 Live]       [Cam 1 Processed]
+            #   [Cam 2 Live]       [Cam 2 Processed]
+            grid = QGridLayout(video_widget)
+            grid.setSpacing(6)
+            grid.setContentsMargins(0, 0, 0, 0)
+            grid.addWidget(self._video_raw_a, 0, 0)
+            grid.addWidget(self._video_a,     0, 1)
+            grid.addWidget(self._video_raw_b, 1, 0)
+            grid.addWidget(self._video_b,     1, 1)
+            # Equal column and row stretch so panels share space evenly
+            grid.setColumnStretch(0, 1)
+            grid.setColumnStretch(1, 1)
+            grid.setRowStretch(0, 1)
+            grid.setRowStretch(1, 1)
+        else:
+            # Single-cam: side-by-side [Live | Processed]
+            row = QHBoxLayout(video_widget)
+            row.setSpacing(6)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.addWidget(self._video_raw_a)
+            row.addWidget(self._video_a)
+            self._video_raw_b.hide()
+            self._video_b.hide()
+
         top.addWidget(video_widget, stretch=3)
 
         # Right column
@@ -703,16 +744,15 @@ class BasketballApp(QMainWindow):
         # Camera A — always present
         self._worker = self._make_worker(self._rtsp_url, "A", run_save, run_chunks)
         self._worker.frame_ready.connect(self._video_a.update_frame)
-        if not self._rtsp_url2:
-            self._worker.raw_frame_ready.connect(self._video_raw_a.update_frame)
+        self._worker.raw_frame_ready.connect(self._video_raw_a.update_frame)
         self._worker.finished.connect(self._on_worker_finished)
         self._worker.start()
 
         # Camera B — only if a second URL was provided
         if self._rtsp_url2:
-            self._video_b.show()
             self._worker2 = self._make_worker(self._rtsp_url2, self._camera2_team, run_save, run_chunks)
             self._worker2.frame_ready.connect(self._video_b.update_frame)
+            self._worker2.raw_frame_ready.connect(self._video_raw_b.update_frame)
             self._worker2.finished.connect(self._on_worker_finished)
             self._worker2.start()
 
