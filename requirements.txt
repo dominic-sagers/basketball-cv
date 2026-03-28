@@ -28,6 +28,11 @@ transformers>=4.52.0     # SAM3 support (future upgrade path once Meta grants ac
 # Note: YOLOv8-face weights auto-downloaded from HuggingFace (arnabdhar/YOLOv8-Face-Detection)
 # Note: SAM2 weights auto-downloaded from HuggingFace (facebook/sam2.1-hiera-large) — not gated
 
+# Alternative detection backend (uncomment to use RF-DETR)
+# rfdetr                  # RF-DETR-L — transformer detection backbone, better occlusion handling
+#                         # Set config.yaml model.backend: rfdetr to activate
+#                         # Note: XL/2XL sizes require a Roboflow subscription (PML license)
+
 # Optional dependencies (uncomment if needed)
 # roboflow                # Access to basketball datasets for fine-tuning (not needed at runtime)
 # matplotlib>=3.7.0       # Charts in Excel export

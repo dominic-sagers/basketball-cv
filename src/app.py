@@ -26,6 +26,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 import threading
@@ -162,8 +163,15 @@ class PipelineWorker(QThread):
         face_blur: FaceBlur | None,
         save_path_base: Path | None,
         annotated_chunks: list[str],
-    ) -> bool:
-        """Process one chunk file. Returns True if stop was requested."""
+        frame_offset: int = 0,
+    ) -> tuple[bool, int]:
+        """
+        Process one chunk file.
+
+        Returns (stopped, frames_processed).
+        frames_processed is used by the caller to accumulate global frame offsets
+        so event timestamps are correct across the full concatenated video.
+        """
         chunk_save = (
             str(save_path_base.with_stem(f"{save_path_base.stem}_chunk_{idx:04d}"))
             if save_path_base else None
@@ -179,11 +187,13 @@ class PipelineWorker(QThread):
             save_path=chunk_save,
             frame_callback=self._frame_cb,
             stop_event=self._stop_event,
+            frame_offset=frame_offset,
         )
         if chunk_save and result.get("ok"):
             annotated_chunks.append(chunk_save)
         tracker.reset()
-        return result.get("stopped_by_user", False) or self._stop_event.is_set()
+        stopped = result.get("stopped_by_user", False) or self._stop_event.is_set()
+        return stopped, result.get("frames", 0)
 
     def run(self) -> None:
         self.status_changed.emit(f"[Cam {self._camera_team}] Loading model …")
@@ -210,11 +220,13 @@ class PipelineWorker(QThread):
 
         save_path_base = Path(self._save_output) if self._save_output else None
         if save_path_base:
-            # Suffix save path with camera team so two workers don't overwrite each other
+            # Suffix with camera team so two workers don't overwrite each other
             save_path_base = save_path_base.with_stem(f"{save_path_base.stem}_cam{self._camera_team}")
 
         annotated_chunks: list[str] = []
+        raw_chunks: list[str] = []       # raw chunk paths in order — for clean video concat
         chunk_idx = 0
+        cumulative_frames = 0            # global frame offset across chunks for event timestamps
 
         while not self._stop_event.is_set():
             try:
@@ -223,31 +235,96 @@ class PipelineWorker(QThread):
                 continue
             if chunk_path is None:
                 break
-            user_quit = self._run_chunk(chunk_path, chunk_idx, tracker, face_blur, save_path_base, annotated_chunks)
+            user_quit, n_frames = self._run_chunk(
+                chunk_path, chunk_idx, tracker, face_blur,
+                save_path_base, annotated_chunks, cumulative_frames,
+            )
+            raw_chunks.append(chunk_path)
+            cumulative_frames += n_frames
             chunk_idx += 1
             if user_quit:
                 recorder.stop()
                 break
 
-        # Drain remaining chunks
+        # Drain remaining chunks after stop
         recorder.stop()
         self.status_changed.emit(f"[Cam {self._camera_team}] Draining remaining chunks …")
         while not chunk_queue.empty():
             remaining = chunk_queue.get_nowait()
             if remaining:
-                self._run_chunk(remaining, chunk_idx, tracker, face_blur, save_path_base, annotated_chunks)
+                _, n_frames = self._run_chunk(
+                    remaining, chunk_idx, tracker, face_blur,
+                    save_path_base, annotated_chunks, cumulative_frames,
+                )
+                raw_chunks.append(remaining)
+                cumulative_frames += n_frames
                 chunk_idx += 1
 
-        # Concat + clean up
+        # ── Post-session: concat, log, highlights ──────────────────────────
+        # All of this runs after the pipeline loop is done — zero inference overhead.
+
         final_path = ""
+
+        # 1. Concat annotated chunks → final annotated video
         if annotated_chunks and save_path_base:
-            self.status_changed.emit(f"[Cam {self._camera_team}] Concatenating …")
+            self.status_changed.emit(f"[Cam {self._camera_team}] Saving annotated video …")
             if _concat_chunks(annotated_chunks, str(save_path_base)):
                 for f in annotated_chunks:
                     Path(f).unlink(missing_ok=True)
-                for f in Path(cam_chunk_dir).glob("chunk_*.mp4"):
-                    f.unlink(missing_ok=True)
                 final_path = str(save_path_base)
+
+        # 2. Concat raw chunks → clean video (source for highlight_maker)
+        # Raw chunks are the unmodified files written by StreamChunkRecorder —
+        # no extra VideoWriter was needed during inference.
+        raw_out: str | None = None
+        if raw_chunks and save_path_base:
+            self.status_changed.emit(f"[Cam {self._camera_team}] Saving raw footage …")
+            raw_out = str(save_path_base.with_stem(save_path_base.stem + "_raw"))
+            if not _concat_chunks(raw_chunks, raw_out):
+                raw_out = None
+
+        # 3. Delete raw source chunks (both annotated and raw concat are done)
+        for f in Path(cam_chunk_dir).glob("chunk_*.mp4"):
+            Path(f).unlink(missing_ok=True)
+
+        # 4. Write event log JSON
+        log_out: str | None = None
+        if save_path_base and self.game_state:
+            self.status_changed.emit(f"[Cam {self._camera_team}] Writing event log …")
+            log_out = str(save_path_base.with_stem(save_path_base.stem + "_log").with_suffix(".json"))
+            source_fps = 25.0
+            if raw_chunks:
+                # Read fps from first chunk rather than hardcoding
+                cap = cv2.VideoCapture(raw_chunks[0])
+                source_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+                cap.release()
+            log_data = {
+                "source": f"cam{self._camera_team}",
+                "source_fps": source_fps,
+                "total_frames": cumulative_frames,
+                "game_state": self.game_state.to_dict(),
+            }
+            Path(log_out).write_text(json.dumps(log_data, indent=2))
+            logger.info("[Cam %s] Event log saved: %s", self._camera_team, log_out)
+
+        # 5. Auto-cut highlights (ffmpeg stream copy — fast, no re-encode)
+        if raw_out and log_out and Path(raw_out).exists() and Path(log_out).exists():
+            self.status_changed.emit(f"[Cam {self._camera_team}] Cutting highlights …")
+            try:
+                from src.highlight_maker import make_highlights
+                highlights_cfg = self._cfg.get("highlights", {})
+                clips = make_highlights(
+                    log_path=log_out,
+                    raw_video_path=raw_out,
+                    pre_s=highlights_cfg.get("pre_seconds", 8.0),
+                    post_s=highlights_cfg.get("post_seconds", 5.0),
+                    min_gap_s=highlights_cfg.get("min_gap_seconds", 3.0),
+                    make_reel=True,
+                )
+                n = len([c for c in clips if "reel" not in c])
+                logger.info("[Cam %s] %d highlight clip(s) saved.", self._camera_team, n)
+            except Exception as exc:
+                logger.warning("[Cam %s] Highlight cutting failed: %s", self._camera_team, exc)
 
         self.status_changed.emit("Idle")
         self.finished.emit(final_path)

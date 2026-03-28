@@ -168,10 +168,12 @@ def run_pipeline(
     *,
     show_preview: bool = True,
     save_path: str | None = None,
+    save_raw_path: str | None = None,
     log_path: str | None = None,
     playback_speed: float = 1.0,
     detect_only: bool = False,
     inference_every: int = 1,
+    frame_offset: int = 0,
     frame_callback: "Callable[[np.ndarray, float], None] | None" = None,
     stop_event: "threading.Event | None" = None,
 ) -> dict:
@@ -181,18 +183,23 @@ def run_pipeline(
     Returns a summary dict with frame count, duration, and average FPS.
 
     Args:
-        source:         Any VideoSource (file/RTSP/USB)
-        detector:       Detector instance (used when detect_only=True)
-        tracker:        Tracker instance (used when detect_only=False)
-        show_preview:   Show an OpenCV window
-        save_path:      If set, write annotated frames to this video file
-        log_path:       If set, write per-frame detection/tracking data to this JSON file
+        source:          Any VideoSource (file/RTSP/USB)
+        detector:        Detector instance (used when detect_only=True)
+        tracker:         Tracker instance (used when detect_only=False)
+        show_preview:    Show an OpenCV window
+        save_path:       If set, write annotated frames to this video file
+        save_raw_path:   If set, write clean (unannotated) frames to this video file.
+                         Use this to produce footage for the highlight maker.
+        log_path:        If set, write per-frame detection/tracking data to this JSON file
         playback_speed:  Slow down (0.5 = half speed) for frame-by-frame inspection
         detect_only:     Skip tracking — raw detections only (faster, less info)
         inference_every: Run inference only on every Nth frame; reuse last result for
                          intermediate frames. inference_every=2 halves inference load
                          while writing every decoded frame to output (smooth video).
                          Useful for live streams where the pipeline can't sustain source FPS.
+        frame_offset:    Cumulative frame count from previous chunks. Events and log
+                         entries use (frame_number + frame_offset) so positions are
+                         correct across the full concatenated video timeline.
         frame_callback:  If set, called with (annotated_frame, fps) for every frame.
                          Used by the Qt app to display frames without a cv2 window.
         stop_event:      If set, pipeline exits cleanly when the event is set.
@@ -204,6 +211,7 @@ def run_pipeline(
 
     viz = Visualizer()
     writer: cv2.VideoWriter | None = None
+    raw_writer: cv2.VideoWriter | None = None
     frame_log: list[dict] = []
     frame_number = 0
     stopped_by_user = False
@@ -248,7 +256,7 @@ def run_pipeline(
             # ── Game state update ──────────────────────────────────────
             score_flash = False
             if game_state is not None and tracks and run_inference:
-                events = game_state.process_frame(tracks, frame_number, source.name)
+                events = game_state.process_frame(tracks, frame_number + frame_offset, source.name)
                 if events:
                     score_flash = True
 
@@ -260,9 +268,10 @@ def run_pipeline(
 
             # ── Frame log entry ────────────────────────────────────────
             if log_path:
+                global_frame = frame_number + frame_offset
                 entry: dict = {
-                    "frame": frame_number,
-                    "timestamp_s": round(frame_number / source.fps, 3) if source.fps else None,
+                    "frame": global_frame,
+                    "timestamp_s": round(global_frame / source.fps, 3) if source.fps else None,
                     "inference_ms": round(elapsed * 1000, 1),
                     "ball_detected": False,
                     "objects": [],
@@ -335,6 +344,14 @@ def run_pipeline(
             if writer is not None:
                 writer.write(annotated)
 
+            if save_raw_path and raw_writer is None:
+                h, w = frame.shape[:2]
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                raw_writer = cv2.VideoWriter(save_raw_path, fourcc, source.fps, (w, h))
+                logger.info("Writing clean (unannotated) output to %s", save_raw_path)
+            if raw_writer is not None:
+                raw_writer.write(frame)
+
             # Log progress every 100 frames
             if frame_number % 100 == 0:
                 logger.info(
@@ -352,6 +369,8 @@ def run_pipeline(
             cv2.destroyAllWindows()
         if writer is not None:
             writer.release()
+        if raw_writer is not None:
+            raw_writer.release()
         if log_path and frame_log:
             Path(log_path).parent.mkdir(parents=True, exist_ok=True)
             ball_frames = sum(1 for e in frame_log if e["ball_detected"])
@@ -386,6 +405,7 @@ def run_pipeline(
         "duration_s": total_time,
         "avg_fps": avg_fps,
         "stopped_by_user": stopped_by_user,
+        "frame_offset_next": frame_offset + frame_number,
     }
 
 
@@ -422,6 +442,10 @@ def main() -> None:
                         help="Chunk duration in seconds for --stream-buffer mode (default: 30)")
     parser.add_argument("--chunk-dir", metavar="DIR", default=None,
                         help="Directory to write stream chunks (default: store/output/stream-chunks/)")
+    parser.add_argument("--save-raw", metavar="PATH", default=None,
+                        help="Save clean (unannotated) video alongside the annotated output. "
+                             "Required input for highlight_maker.py. In stream-buffer mode the "
+                             "raw chunks are concatenated; in file mode a parallel writer is used.")
 
     # One-off source overrides
     grp = parser.add_argument_group("one-off source overrides")
@@ -508,7 +532,9 @@ def main() -> None:
 
         save_path_base = Path(args.save_output) if args.save_output else None
         annotated_chunks: list[str] = []
+        raw_chunks: list[str] = []          # raw chunk_*.mp4 files in order, for highlight concat
         chunk_idx = 0
+        cumulative_frames = 0               # running frame total — keeps event timestamps global
 
         # Terminal key watcher — lets user press 'q' without a preview window
         _quit_event = threading.Event()
@@ -517,7 +543,7 @@ def main() -> None:
 
         def _process_chunk(chunk_path: str, idx: int) -> bool:
             """Run pipeline on one chunk. Returns True if user requested stop."""
-            nonlocal annotated_chunks
+            nonlocal annotated_chunks, cumulative_frames
             chunk_source = FileVideoSource(chunk_path, name=f"chunk-{idx:04d}")
             chunk_save = (
                 str(save_path_base.with_stem(f"{save_path_base.stem}_chunk_{idx:04d}"))
@@ -530,9 +556,13 @@ def main() -> None:
                 game_state=game_state, face_blur=face_blur,
                 show_preview=show_preview, save_path=chunk_save,
                 detect_only=detect_only, inference_every=args.inference_every,
+                frame_offset=cumulative_frames,
             )
             if chunk_save and result.get("ok"):
                 annotated_chunks.append(chunk_save)
+            # Track raw chunk path in order (for later concat into clean video)
+            raw_chunks.append(chunk_path)
+            cumulative_frames = result.get("frame_offset_next", cumulative_frames)
             if tracker is not None:
                 tracker.reset()
             return result.get("stopped_by_user", False)
@@ -584,32 +614,77 @@ def main() -> None:
 
         _quit_event.set()  # stop watcher thread
 
-        # Auto-concatenate all annotated chunks into one file, then clean up
+        # Auto-concatenate annotated chunks → final annotated output
         if annotated_chunks and save_path_base:
             concat_out = str(save_path_base)
             if _concat_chunks(annotated_chunks, concat_out):
                 for f in annotated_chunks:
                     Path(f).unlink(missing_ok=True)
-                for f in Path(chunk_dir).glob("chunk_*.mp4"):
-                    f.unlink(missing_ok=True)
-                logger.info("Chunks deleted after successful concatenation.")
-        elif not save_path_base and annotated_chunks:
-            logger.info("No --save-output specified — annotated chunks not saved.")
+                logger.info("Annotated chunks deleted after successful concatenation.")
+
+        # Concat raw chunks → clean video (for highlight_maker.py)
+        if args.save_raw and raw_chunks:
+            if _concat_chunks(raw_chunks, args.save_raw):
+                logger.info("Clean (unannotated) video saved to %s", args.save_raw)
+                logger.info(
+                    "Run highlight_maker.py with this file and the event log to cut highlight clips."
+                )
+
+        # Delete raw source chunks after both concat passes
+        for f in Path(chunk_dir).glob("chunk_*.mp4"):
+            f.unlink(missing_ok=True)
+        if raw_chunks:
+            logger.info("Raw source chunks deleted.")
 
     else:
+        # Auto-create a per-run timestamped directory (mirrors app.py / stream-buffer behaviour).
+        # Outputs that aren't explicitly specified are placed here automatically.
+        run_dir: Path | None = None
+        if args.save_output or args.save_raw or args.save_log:
+            run_id = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+            # Derive a base name from the source (file stem, url slug, or usb index)
+            if args.file:
+                src_stem = Path(args.file).stem
+            elif args.rtsp:
+                src_stem = "rtsp"
+            else:
+                src_stem = f"usb{args.usb}"
+            # Place run dir alongside the first explicitly given output, or in store/output/
+            explicit_out = args.save_output or args.save_raw or args.save_log
+            run_dir = Path(explicit_out).parent / f"{src_stem}_{run_id}"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            logger.info("Run directory: %s", run_dir)
+
         for source in sources:
             logger.info("Starting pipeline on source: %s", source.name)
+            src_suffix = f"_{source.name}" if len(sources) > 1 else ""
 
-            # When saving multiple sources, append source name to avoid overwriting
-            save_path = args.save_output
-            if save_path and len(sources) > 1:
-                p = Path(save_path)
-                save_path = str(p.with_stem(f"{p.stem}_{source.name}"))
+            # Resolve save paths — use run_dir if no explicit path given
+            if args.save_output:
+                p = Path(args.save_output)
+                save_path = str(run_dir / p.with_stem(p.stem + src_suffix).name)
+            else:
+                save_path = None
 
-            log_path = args.save_log
-            if log_path and len(sources) > 1:
-                p = Path(log_path)
-                log_path = str(p.with_stem(f"{p.stem}_{source.name}"))
+            if args.save_raw:
+                p = Path(args.save_raw)
+                save_raw = str(run_dir / p.with_stem(p.stem + src_suffix).name)
+            elif run_dir and args.save_output:
+                # Auto-derive raw path from annotated output name
+                p = Path(args.save_output)
+                save_raw = str(run_dir / p.with_stem(p.stem + src_suffix + "_raw").name)
+            else:
+                save_raw = None
+
+            if args.save_log:
+                p = Path(args.save_log)
+                log_path = str(run_dir / p.with_stem(p.stem + src_suffix).name)
+            elif run_dir and args.save_output:
+                # Auto-derive log path alongside annotated output
+                stem = Path(args.save_output).stem + src_suffix
+                log_path = str(run_dir / f"{stem}_log.json")
+            else:
+                log_path = None
 
             run_pipeline(
                 source=source,
@@ -619,6 +694,7 @@ def main() -> None:
                 face_blur=face_blur,
                 show_preview=show_preview,
                 save_path=save_path,
+                save_raw_path=save_raw,
                 log_path=log_path,
                 playback_speed=args.playback_speed,
                 detect_only=detect_only,

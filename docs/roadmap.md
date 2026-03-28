@@ -93,9 +93,20 @@ Goal: attach all Phase 1 stats to individual players.
 
 ---
 
+## Highlights ✓ (post-processing)
+
+- [x] `highlight_maker.py` — reads event log JSON + clean raw video; cuts a clip per basket using ffmpeg stream copy
+- [x] Clips merged when events are within `min_gap_seconds` (avoids near-duplicates from one basket)
+- [x] `--reel` flag concatenates all clips into a single highlight reel
+- [x] All params tunable via `config.yaml highlights:` (pre_seconds, post_seconds, min_gap_seconds)
+- [x] Auto-runs after every live session in `app.py` — highlights saved to `highlights/` in the run directory
+- [x] Can also be run manually: `python src/highlight_maker.py game_log.json game_raw.mp4 --reel`
+
+---
+
 ## Deferred / future
 
 - Foul detection (travelling, shooting foul) — complex pose sequences, low priority
 - 3D court reconstruction (multi-camera)
 - Web dashboard for post-game review
-- Automatic highlight clip generation
+- Event-type highlights (not just baskets) — blocks, fast breaks, etc. once event_logic.py is built

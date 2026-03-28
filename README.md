@@ -39,7 +39,7 @@ python src/app.py --rtsp http://<phone-tailscale-ip>:8080/video --chunk-seconds 
 # Dual camera (one per basket)
 python src/app.py --rtsp http://<camA-ip>:8080/video --rtsp2 http://<camB-ip>:8080/video --chunk-seconds 5
 
-# With output saved (auto-concatenated on stop)
+# With output saved — on Stop, app auto-saves annotated video, raw video, event log, and highlights
 python src/app.py --rtsp http://<camA-ip>:8080/video --save-output store/output/game.mp4
 
 # Post-process recorded footage to blur faces
@@ -47,6 +47,9 @@ python src/blur_footage.py store/output/game.mp4
 
 # Adjust face detection sensitivity (higher imgsz catches far-away faces)
 python src/blur_footage.py store/output/game.mp4 --face-imgsz 1920 --face-conf 0.1
+
+# Manually cut highlights from any recorded game
+python src/highlight_maker.py store/output/<run>/game_log.json store/output/<run>/game_raw.mp4 --reel
 ```
 
 ---
@@ -88,7 +91,14 @@ python src/blur_footage.py store/output/game.mp4 --face-imgsz 1920 --face-conf 0
 - [x] Per-run timestamped output directories — each session saved separately
 - [x] Stream health monitoring — warns on dropped frames / poor connection
 
-### Privacy
+### Highlights ✓
+
+- [x] `highlight_maker.py` — reads event log + clean raw video, cuts a clip per basket (8s before, 5s after by default) using ffmpeg stream copy
+- [x] Auto-runs after every live session in `app.py` — highlights saved to `highlights/` inside the run directory
+- [x] `--reel` concatenates all clips into a single highlight reel
+- [x] All params tunable in `config.yaml highlights:` section
+
+### Privacy ✓
 
 - [x] `face_blur.py` + `blur_footage.py` — post-processing face blur using YOLOv8-face detection + SAM2 pixel-precise segmentation. Detects faces on keyframes, propagates masks across all frames, applies Gaussian blur only to face pixels. Handles distant court faces via `--face-imgsz`.
 
@@ -115,6 +125,7 @@ basketball-cv/
 │   ├── game_state.py        # score, event log, shot debouncing
 │   ├── face_blur.py         # YOLOv8-face + SAM2 face segmentation and blur
 │   ├── blur_footage.py      # CLI: post-process a recorded video to blur all faces
+│   ├── highlight_maker.py   # CLI: cut basket highlight clips from event log + raw video
 │   │
 │   ├── train.py             # fine-tune YOLOv11 from config.yaml (swap dataset in one line)
 │   ├── pipeline_test.py     # end-to-end test: source → detect/track → score → visualize

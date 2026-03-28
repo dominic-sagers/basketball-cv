@@ -60,15 +60,26 @@
 
 ### `src/pipeline_test.py`
 - End-to-end loop: source → detect/track → game_state → visualize → optional output
-- `run_pipeline()` — core loop, accepts optional `frame_callback(frame, fps)` and `stop_event` for Qt integration
-- `--save-output PATH` — write annotated mp4
-- `--save-log PATH` — write per-frame JSON with ball detection rate
+- `run_pipeline()` — core loop; accepts `frame_callback`, `stop_event`, `save_raw_path`, and `frame_offset` for Qt integration and highlight support
+- `--save-output PATH` — write annotated mp4; auto-creates a timestamped run directory alongside it
+- `--save-raw PATH` — write clean (unannotated) mp4 in parallel; auto-derived from `--save-output` if not given
+- `--save-log PATH` — write event log JSON; auto-derived from `--save-output` if not given
 - `--stream-buffer` — record RTSP stream to chunk files via `StreamChunkRecorder`, process chunks sequentially; eliminates dropped frames at the cost of a one-chunk delay
 - `--chunk-seconds N` — chunk duration (default 30; use 5 for low-latency preview)
 - `--chunk-dir DIR` — where chunk files are written
 - `--inference-every N` — run inference every N frames, reuse last result for intermediate frames; halves inference load at N=2
 - `--detect-only`, `--playback-speed`, `--no-preview` flags
-- Auto-concatenates annotated chunks on stop and deletes chunk files after successful concat
+- `frame_offset` parameter accumulates global frame numbers across chunks so event timestamps are correct in the concatenated video timeline
+- Auto-creates per-run timestamped output directory; auto-concatenates chunks on stop
+
+**Output layout (file mode):**
+```
+store/output/game_2_church_2026-03-27_203158/
+  game2_annotated.mp4          ← annotated
+  game2_annotated_raw.mp4      ← clean footage  (auto-derived)
+  game2_annotated_log.json     ← event log       (auto-derived)
+  highlights/                  ← cut by highlight_maker.py
+```
 
 ### `src/app.py`
 - PyQt6 desktop application — the primary interface for live game sessions
@@ -79,6 +90,24 @@
 - **`LogPanel`** — scrolling log widget capturing all Python logging output via `_QtLogHandler`
 - **Dual-camera support**: `--rtsp2 URL` adds Camera B; both workers run in parallel, each with its own `GameState`; `camera_team` parameter routes score events to the correct team; Camera B panel hidden until second URL is provided
 - **Score ownership**: `BasketballApp` holds the authoritative `_score` dict; all score changes (auto detection + manual buttons) flow through `_apply_score(team, delta)`
+- **Post-session pipeline** (runs after Stop — zero inference overhead):
+  1. Concat annotated chunks → `game_camA.mp4`
+  2. Concat raw `StreamChunkRecorder` chunks → `game_camA_raw.mp4` (no extra VideoWriter during inference)
+  3. Delete source chunks
+  4. Write event log → `game_camA_log.json`
+  5. Auto-cut highlights via `highlight_maker.make_highlights()` → `highlights/` subdirectory
+
+**Output layout (live session):**
+```
+store/output/2026-03-27_203158/
+  game_camA.mp4                ← annotated
+  game_camA_raw.mp4            ← clean footage
+  game_camA_log.json           ← event log
+  highlights/
+    game_camA_raw_highlight_001_teamA_45s.mp4
+    ...
+    game_camA_raw_highlight_reel.mp4
+```
 
 Usage:
 ```bash
@@ -88,9 +117,17 @@ python src/app.py --rtsp http://100.88.2.45:8080/video --chunk-seconds 5
 # Dual camera
 python src/app.py --rtsp http://<camA>/video --rtsp2 http://<camB>/video --chunk-seconds 5
 
-# With save output (auto-concatenated on stop)
+# With save output (annotated + raw + log + highlights all auto-saved on stop)
 python src/app.py --rtsp http://<url>/video --chunk-seconds 5 --save-output store/output/game.mp4
 ```
+
+### `src/highlight_maker.py`
+- Reads the pipeline event log JSON + clean raw video; cuts a clip around each scored basket using ffmpeg stream copy (no re-encode)
+- Events within `--min-gap` seconds are merged into one clip to avoid near-duplicate highlights from the same basket
+- `--reel` flag concatenates all clips into a single highlight reel mp4
+- Clip window tunable via CLI or `config.yaml highlights:` section (defaults: 8s pre, 5s post, 3s min-gap)
+- Called automatically by `app.py` after each live session; can also be run manually on any recorded game
+- Usage: `python src/highlight_maker.py game_log.json game_raw.mp4 [--pre 10] [--post 7] [--reel] [--out-dir PATH]`
 
 ### `src/face_blur.py`
 - `FaceBlur` class: YOLOv8-face (`arnabdhar/YOLOv8-Face-Detection`) detects face bounding boxes on keyframes; SAM2 (`facebook/sam2.1-hiera-large`) propagates pixel-precise face masks across all frames; Gaussian blur applied only to masked pixels

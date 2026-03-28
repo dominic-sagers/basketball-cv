@@ -48,14 +48,24 @@ sources:
 
 # ---------------------------------------------------------------------------
 # Detection model
+# Switch `backend` between "yolo" and "rfdetr" to change the detection engine.
+# All other pipeline code is backend-agnostic — only this section changes.
 # ---------------------------------------------------------------------------
 model:
+  backend: "yolo"              # "yolo" | "rfdetr"
+
+  # --- YOLOv11 (active) ---
   weights: "store/weights/basketball-ft.pt"   # fine-tuned on basketball-detection-srfkd (9,599 imgs, 50 epochs)
   # weights: "yolo11m.pt"                     # COCO baseline — 14.8% ball detection, 48.5 FPS
+  input_size: 960              # 1280 → ~26 FPS, 960 → ~48 FPS on RTX 4080S
+
+  # --- RF-DETR-L (swap in when fine-tuned) ---
+  # weights: "store/weights/basketball-rfdetr-l/best.pth"
+  # input_size: 560            # RF-DETR native resolution — 560 or 640
+
   device: 0                    # GPU index (0 = first GPU); "cpu" for CPU-only
   confidence: 0.4
   iou_threshold: 0.5
-  input_size: 960              # 1280 → ~26 FPS, 960 → ~48 FPS on RTX 4080S
   class_map:
     0: "Ball"
     1: "Ball_in_Basket"
@@ -65,22 +75,35 @@ model:
 
 # ---------------------------------------------------------------------------
 # Training
-# Swap `dataset` to point at a different store/dataset/<name>/data.yaml to
-# train on a different dataset without changing anything else.
-# Each dataset lives in its own named subdirectory under store/dataset/.
+# Set `backend` to "yolo" or "rfdetr" to select the training engine.
+# Each backend reads its own fields; unused fields are ignored.
 #
 # Known datasets (all stored in store/dataset/):
-#   basketball-srfkd   — Roboflow basketball-detection-srfkd, 9,599 imgs, 5 classes
-#                        mAP50=0.956, ball=0.943, basket=0.979 (50 epochs, yolo11m)
+#   basketball-srfkd        — YOLO format  (Roboflow export: YOLOv11)
+#   basketball-srfkd-coco   — COCO format  (Roboflow export: COCO JSON) — required for RF-DETR
+#                             mAP50=0.956, ball=0.943, basket=0.979 (50 epochs, yolo11m)
 # ---------------------------------------------------------------------------
 training:
-  dataset: "store/dataset/basketball-srfkd/data.yaml"   # active dataset for yolo train
-  base_model: "yolo11m.pt"    # starting weights (COCO); swap for a .pt to fine-tune further
+  backend: "yolo"              # "yolo" | "rfdetr"
+
+  # --- YOLOv11 training ---
+  dataset: "store/dataset/basketball-srfkd/data.yaml"   # YOLO-format data.yaml
+  base_model: "yolo11m.pt"    # starting weights; swap for a .pt to continue fine-tuning
   epochs: 50
   imgsz: 960
   batch: 8                    # 8 = safe for 16GB VRAM at imgsz=960; 16 causes OOM
   device: 0
   output_name: "basketball-ft"    # weights saved to store/weights/<output_name>/
+
+  # --- RF-DETR-L training (uncomment and set backend: "rfdetr" to use) ---
+  # dataset: "store/dataset/basketball-srfkd-coco"  # COCO-format dir (train/ + val/ with annotations.json)
+  # base_model: "rfdetr-l"    # "rfdetr-l" downloads pretrained weights automatically
+  # epochs: 50
+  # batch: 4                  # 4 = safe for 16GB VRAM; use grad_accum to simulate larger batches
+  # grad_accum: 4             # effective batch size = batch * grad_accum = 16
+  # lr: 1e-4
+  # device: 0
+  # output_name: "basketball-rfdetr-l"   # weights saved to store/weights/<output_name>/
 
 # ---------------------------------------------------------------------------
 # Multi-object tracking (ByteTrack)
@@ -107,6 +130,15 @@ event_logic:
   shot_downward_frames: 3      # frames ball must travel downward through hoop zone
   assist_possession_window: 5  # seconds — look-back window for last pass
   block_hand_ball_dist_px: 40  # max hand-to-ball distance to count as a block
+
+# ---------------------------------------------------------------------------
+# Highlight maker (src/highlight_maker.py)
+# ---------------------------------------------------------------------------
+highlights:
+  pre_seconds: 8               # seconds of footage before each basket
+  post_seconds: 5              # seconds of footage after each basket
+  min_gap_seconds: 3           # events within this gap are merged into one clip
+  out_dir: null                # null = <raw_video_dir>/highlights/
 
 # ---------------------------------------------------------------------------
 # Output

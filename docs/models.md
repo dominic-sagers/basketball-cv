@@ -30,32 +30,54 @@ Already integrated in the pipeline. See `src/detector.py` and `src/tracker.py`.
 | `yolo11m.pt` | ~60 FPS | Default — best balance for single stream |
 | `yolo11l.pt` | ~40 FPS | Better accuracy if FPS allows |
 
-### RF-DETR (alternative worth evaluating)
+### RF-DETR-L (alternative backend — integrated, pending fine-tune)
 
-RF-DETR is Roboflow's real-time detection transformer, released March 2025.
-Built on a DINOv2 vision transformer backbone rather than CNN, which gives
-it notably better occlusion handling — relevant for 10-player pickup games
-where bodies regularly overlap.
+RF-DETR is Roboflow's real-time detection transformer, built on a DINOv2
+vision transformer backbone. Better occlusion handling than CNN-based YOLO —
+relevant for 10-player pickup games where bodies regularly overlap.
 
 **Why it matters for basketball-cv:**
-- Heavy occlusion (screens, pile-ups) is where YOLO-family models degrade most
-- Transformer attention can better isolate players in crowded frames
-- May reduce the "player disappears behind screen" tracking drop that causes missed events
+- Transformer attention isolates players in crowded/overlapping frames better than YOLO's CNN backbone
+- First real-time model to exceed 60 mAP on COCO (RF-DETR-L: 60.5 mAP)
+- Reduces the "player disappears behind screen" tracking drop that causes missed assist/block events
 
-**Performance on T4 GPU (slower than RTX 4080 Super):**
+**Performance:**
 
-| Model | COCO mAP | FPS (T4) | Notes |
-|---|---|---|---|
-| RF-DETR-N | ~48 | ~45 FPS | Nano — fast but lower accuracy |
-| RF-DETR-S | ~52 | ~33 FPS | Small — closest to YOLOv11m territory |
-| RF-DETR-M | ~56 | ~25 FPS | May hit 40-50 FPS on RTX 4080 Super |
-| RF-DETR-L | 60.5 | ~20 FPS | Best accuracy; benchmark before committing |
+| Model | COCO mAP | Est. FPS (RTX 4080S) | License | Notes |
+|---|---|---|---|---|
+| RF-DETR-N | 48.4 | ~135 | Apache 2.0 | Fast, lower accuracy |
+| RF-DETR-S | ~52 | ~99 | Apache 2.0 | |
+| RF-DETR-M | 54.7 | ~75 | Apache 2.0 | |
+| **RF-DETR-L** | **60.5** | **~60** | **Apache 2.0** | **Target model** |
+| RF-DETR-XL | higher | ~35–40 | Roboflow PML | Proprietary — skip |
+| RF-DETR-2XL | highest | ~20–25 | Roboflow PML | Proprietary — skip |
 
-RTX 4080 Super is roughly 2.5-3x faster than T4, so RF-DETR-M/L may be viable.
-**Must benchmark before building event logic on top of it.**
+RTX 4080 Super estimates assume ~3× T4 throughput — benchmark before relying on these.
 
-**License:** Nano through Large are Apache 2.0 (free, open source).
-XL and 2XL are Roboflow proprietary (PML 1.0).
+**Integration status:** Backend wired into `src/detector.py` and `src/train.py`.
+Switch with two lines in `config.yaml`:
+```yaml
+model:
+  backend: "rfdetr"
+  weights: "store/weights/basketball-rfdetr-l/best.pth"
+
+training:
+  backend: "rfdetr"
+  dataset: "store/dataset/basketball-srfkd-coco"   # COCO JSON format
+```
+
+**Dataset format:** RF-DETR requires COCO JSON, not YOLO format.
+Export from Roboflow as "COCO JSON" and place under `store/dataset/basketball-srfkd-coco/`.
+Expected layout:
+```
+basketball-srfkd-coco/
+  train/
+    images/
+    annotations.json
+  val/
+    images/
+    annotations.json
+```
 
 **Install:**
 ```bash
@@ -64,9 +86,10 @@ pip install rfdetr
 
 **GitHub:** https://github.com/roboflow/rf-detr
 
-**Decision:** Use YOLOv11 as default (already integrated, ByteTrack built in).
-Evaluate RF-DETR on your test footage once you have it — if occlusion causes
-frequent track loss, it's the first alternative to try.
+**Decision:** YOLOv11 remains the default (fine-tuned, ByteTrack built in).
+Benchmark RF-DETR-L against test footage once event logic is being built —
+if ByteTrack loses players during screens and causes missed events, that is
+the trigger to fine-tune and switch backends.
 
 ---
 
