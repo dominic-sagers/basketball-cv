@@ -464,6 +464,20 @@ def main() -> None:
     with open(config_path) as f:
         cfg = yaml.safe_load(f)
 
+    # Auto-derive --save-output from the source name if not given.
+    # This means every run produces a timestamped subdirectory by default.
+    if args.save_output is None and not args.no_preview:
+        if args.file:
+            stem = Path(args.file).stem
+        elif args.rtsp:
+            stem = "game"
+        elif args.usb is not None:
+            stem = f"usb{args.usb}"
+        else:
+            stem = "game"
+        args.save_output = f"store/output/{stem}.mp4"
+        logger.info("Auto save output: %s", args.save_output)
+
     model_cfg = cfg["model"]
     tracking_cfg = cfg.get("tracking", {})
 
