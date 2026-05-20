@@ -13,6 +13,9 @@ numpy>=1.24.0             # Array operations
 # Configuration and logging
 pyyaml>=6.0              # config.yaml parsing
 
+# Data versioning — large assets in store/ pulled from SSH remote
+dvc[ssh]>=3.0            # `dvc pull` to fetch store/ from the configured remote
+
 # Data handling and export (Phase 2)
 pandas>=2.0.0            # Stat aggregation and export
 openpyxl>=3.1.0          # Excel export
@@ -20,6 +23,11 @@ openpyxl>=3.1.0          # Excel export
 # Scoreboard UI (Phase 1.5)
 pygame>=2.5.0            # Real-time overlay rendering
 PyQt6>=6.5.0             # Desktop app UI (app.py)
+
+# Android frontend receiver (http_chunk_receiver.py)
+fastapi>=0.115.0         # HTTP server for /api/v1/chunks/* endpoints
+uvicorn[standard]>=0.32.0 # ASGI runner; [standard] pulls httptools+uvloop for speed
+python-multipart>=0.0.12 # multipart/form-data parser (Android client uploads chunks this way)
 
 # Privacy / face blur (post-processing via blur_footage.py)
 sam2>=1.1.0              # SAM2 video predictor — pixel-precise face mask propagation

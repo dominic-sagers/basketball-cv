@@ -141,6 +141,23 @@ highlights:
   out_dir: null                # null = <raw_video_dir>/highlights/
 
 # ---------------------------------------------------------------------------
+# Android frontend receiver (src/http_chunk_receiver.py)
+# FastAPI server that accepts chunked MP4 uploads from the Android recorder app
+# and validates them before handing off to the detection pipeline.
+# ---------------------------------------------------------------------------
+receiver:
+  host: "0.0.0.0"              # bind address; 0.0.0.0 = all interfaces (LAN + Tailscale)
+  port: 8000                   # matches Android client's DEFAULT_BACKEND_URL
+  storage_root: "store/chunks/"
+                               # received/   — raw uploads (chunk_id.mp4 + .json + .crc32)
+                               # validated/  — chunks that passed healthcheck
+                               # failed/     — chunks that failed (kept for debugging)
+  frame_count_tolerance: 0.05  # accept chunks whose ffprobe frame count is within ±5%
+                               # of expected_frame_count from chunk header
+  healthcheck_workers: 2       # background threads draining the validation queue
+  status_cache_ttl_seconds: 3600 # how long to keep healthcheck results in memory
+
+# ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------
 output:
