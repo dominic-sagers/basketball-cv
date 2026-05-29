@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import queue
+import re
 import shutil
 import threading
 import time
@@ -36,7 +37,7 @@ import zlib
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 import cv2
 import yaml
@@ -289,10 +290,12 @@ class HealthcheckWorker:
         cfg: ReceiverConfig,
         cache: StatusCache,
         chunk_queue: "queue.Queue[str | None]",
+        on_validated: "Callable[[ChunkStatus], None] | None" = None,
     ) -> None:
         self._cfg = cfg
         self._cache = cache
         self._queue = chunk_queue
+        self._on_validated = on_validated
         self._threads: list[threading.Thread] = []
         self._stop_event = threading.Event()
 
@@ -353,140 +356,327 @@ class HealthcheckWorker:
             f" ({'; '.join(result.issues)})" if result.issues else "",
         )
 
+        # Notify any in-process consumer (e.g. ChunkReceiverSource) that this
+        # chunk has finished validating and its files are now in validated/ or failed/.
+        if self._on_validated is not None:
+            try:
+                self._on_validated(result)
+            except Exception:
+                logger.exception("on_validated callback failed for %s", chunk_id)
+
 
 # ---------------------------------------------------------------------------
-# FastAPI app
+# FastAPI app factory
+# ---------------------------------------------------------------------------
+
+def create_app(
+    cfg: ReceiverConfig,
+    cache: StatusCache,
+    chunk_queue: "queue.Queue[str | None]",
+    worker: HealthcheckWorker,
+) -> FastAPI:
+    """
+    Build a FastAPI app whose routes close over the given instances.
+
+    Used both by the module-level standalone `app` and by ChunkReceiverSource,
+    which embeds the receiver in-process alongside the CV pipeline.
+    """
+
+    @asynccontextmanager
+    async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        """Create storage directories and start the validation worker pool, then tear down on shutdown."""
+        for sub in ("received", "validated", "failed"):
+            (cfg.storage_root / sub).mkdir(parents=True, exist_ok=True)
+        worker.start()
+        logger.info(
+            "Receiver ready on %s:%d, storage=%s, tolerance=%.0f%%",
+            cfg.host, cfg.port, cfg.storage_root, cfg.frame_count_tolerance * 100,
+        )
+        try:
+            yield
+        finally:
+            worker.stop()
+
+    app = FastAPI(title="basketball-cv chunk receiver", lifespan=_lifespan)
+
+    @app.post("/api/v1/chunks/upload", status_code=202)
+    async def upload_chunk(
+        metadata: str = Form(...),
+        video: UploadFile = File(...),
+        checksum: str = Form(""),
+    ) -> dict[str, Any]:
+        """
+        Receive a multipart chunk upload from the Android recorder app.
+
+        Expected fields (match Android ChunkUploader.kt):
+            metadata  application/json — ChunkHeader (chunk_id, expected_frame_count,
+                      checksum_value, encoding, ...)
+            video     application/octet-stream — MP4 bytes
+            checksum  text/plain — CRC32 hex (also present inside metadata; we trust this one)
+
+        Writes three files to received/<chunk_id>.{mp4,json,crc32} and enqueues for
+        background validation. Returns 202 Accepted immediately.
+        """
+        try:
+            header = json.loads(metadata)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail=f"metadata JSON invalid: {exc}")
+
+        chunk_id = str(header.get("chunk_id") or "").strip()
+        if not chunk_id:
+            raise HTTPException(status_code=400, detail="metadata.chunk_id is required")
+        # Defensive — prevent path traversal
+        if "/" in chunk_id or ".." in chunk_id:
+            raise HTTPException(status_code=400, detail="metadata.chunk_id contains illegal characters")
+
+        received_dir = cfg.storage_root / "received"
+        received_dir.mkdir(parents=True, exist_ok=True)
+
+        mp4_path = received_dir / f"{chunk_id}.mp4"
+        json_path = received_dir / f"{chunk_id}.json"
+        crc_path = received_dir / f"{chunk_id}.crc32"
+
+        # Stream the upload to disk so memory stays bounded regardless of chunk size.
+        bytes_written = 0
+        with mp4_path.open("wb") as f:
+            while True:
+                buf = await video.read(1 << 20)  # 1 MB
+                if not buf:
+                    break
+                f.write(buf)
+                bytes_written += len(buf)
+
+        json_path.write_text(json.dumps(header, indent=2))
+        if checksum:
+            crc_path.write_text(checksum.strip())
+
+        now_ms = int(time.time() * 1000)
+        cache.put(
+            ChunkStatus(
+                chunk_id=chunk_id,
+                status="pending",
+                received_ms=now_ms,
+                expected_frame_count=int(header.get("expected_frame_count", 0)),
+            )
+        )
+        chunk_queue.put(chunk_id)
+
+        logger.info(
+            "Received %s — %.1f MB, expected %d frames, encoding=%s",
+            chunk_id,
+            bytes_written / 1024 / 1024,
+            header.get("expected_frame_count", 0),
+            header.get("encoding", "?"),
+        )
+        return {
+            "status": "received",
+            "chunk_id": chunk_id,
+            "timestamp_received_ms": now_ms,
+            "message": "Chunk queued for healthcheck",
+        }
+
+    @app.get("/api/v1/chunks/{chunk_id}/status")
+    async def get_chunk_status(chunk_id: str) -> JSONResponse:
+        """
+        Return validation state for a previously-uploaded chunk.
+
+        Returns 200 OK with status "healthy" or "unhealthy" once validation completes,
+        202 Accepted with status "pending" while the worker is still processing,
+        404 Not Found if the chunk_id was never uploaded.
+        """
+        status = cache.get(chunk_id)
+        if status is None:
+            raise HTTPException(status_code=404, detail=f"Unknown chunk_id: {chunk_id}")
+        if status.status == "pending":
+            return JSONResponse(status_code=202, content=status.to_dict())
+        return JSONResponse(status_code=200, content=status.to_dict())
+
+    @app.get("/healthz")
+    async def healthz() -> dict[str, Any]:
+        """Liveness probe — returns the receiver's resolved config so you can confirm it's running."""
+        return {
+            "status": "ok",
+            "host": cfg.host,
+            "port": cfg.port,
+            "storage_root": str(cfg.storage_root),
+            "frame_count_tolerance": cfg.frame_count_tolerance,
+            "workers": cfg.healthcheck_workers,
+        }
+
+    return app
+
+
+# ---------------------------------------------------------------------------
+# Module-level app (standalone path: `uvicorn src.http_chunk_receiver:app`)
 # ---------------------------------------------------------------------------
 
 _cfg = ReceiverConfig.from_yaml()
 _cache = StatusCache(ttl_seconds=_cfg.status_cache_ttl_seconds)
 _queue: "queue.Queue[str | None]" = queue.Queue()
 _worker = HealthcheckWorker(_cfg, _cache, _queue)
-
-@asynccontextmanager
-async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    """Create storage directories and start the validation worker pool, then tear down on shutdown."""
-    for sub in ("received", "validated", "failed"):
-        (_cfg.storage_root / sub).mkdir(parents=True, exist_ok=True)
-    _worker.start()
-    logger.info(
-        "Receiver ready on %s:%d, storage=%s, tolerance=%.0f%%",
-        _cfg.host, _cfg.port, _cfg.storage_root, _cfg.frame_count_tolerance * 100,
-    )
-    try:
-        yield
-    finally:
-        _worker.stop()
+app = create_app(_cfg, _cache, _queue, _worker)
 
 
-app = FastAPI(title="basketball-cv chunk receiver", lifespan=_lifespan)
+# ---------------------------------------------------------------------------
+# In-process chunk source
+# ---------------------------------------------------------------------------
 
-
-@app.post("/api/v1/chunks/upload", status_code=202)
-async def upload_chunk(
-    metadata: str = Form(...),
-    video: UploadFile = File(...),
-    checksum: str = Form(""),
-) -> dict[str, Any]:
+class ChunkReceiverSource:
     """
-    Receive a multipart chunk upload from the Android recorder app.
+    Embeds the FastAPI receiver in-process and exposes validated chunks as a queue.
 
-    Expected fields (match Android ChunkUploader.kt):
-        metadata  application/json — ChunkHeader (chunk_id, expected_frame_count,
-                  checksum_value, encoding, ...)
-        video     application/octet-stream — MP4 bytes
-        checksum  text/plain — CRC32 hex (also present inside metadata; we trust this one)
+    Mirrors StreamChunkRecorder's interface so PipelineWorker can consume Android
+    uploads the same way it consumes RTSP-recorded chunks:
 
-    Writes three files to received/<chunk_id>.{mp4,json,crc32} and enqueues for
-    background validation. Returns 202 Accepted immediately.
-    """
-    try:
-        header = json.loads(metadata)
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail=f"metadata JSON invalid: {exc}")
-
-    chunk_id = str(header.get("chunk_id") or "").strip()
-    if not chunk_id:
-        raise HTTPException(status_code=400, detail="metadata.chunk_id is required")
-    # Defensive — prevent path traversal
-    if "/" in chunk_id or ".." in chunk_id:
-        raise HTTPException(status_code=400, detail="metadata.chunk_id contains illegal characters")
-
-    received_dir = _cfg.storage_root / "received"
-    received_dir.mkdir(parents=True, exist_ok=True)
-
-    mp4_path = received_dir / f"{chunk_id}.mp4"
-    json_path = received_dir / f"{chunk_id}.json"
-    crc_path = received_dir / f"{chunk_id}.crc32"
-
-    # Stream the upload to disk so memory stays bounded regardless of chunk size.
-    bytes_written = 0
-    with mp4_path.open("wb") as f:
+        source = ChunkReceiverSource(cfg)
+        chunk_queue = source.start()
         while True:
-            buf = await video.read(1 << 20)  # 1 MB
-            if not buf:
+            path = chunk_queue.get()
+            if path is None:        # sentinel: receiver stopped
                 break
-            f.write(buf)
-            bytes_written += len(buf)
+            process(path)           # wrap in FileVideoSource
+        source.stop()
 
-    json_path.write_text(json.dumps(header, indent=2))
-    if checksum:
-        crc_path.write_text(checksum.strip())
+    A uvicorn server runs in a background thread. Each chunk that passes the
+    healthcheck is buffered keyed by the integer suffix of its chunk_id
+    (e.g. camera_0_chunk_7 -> 7) and emitted onto the output queue in ascending
+    sequence order. Because the healthcheck pool validates chunks in parallel,
+    completion order is not guaranteed, so a release thread enforces ordering:
 
-    now_ms = int(time.time() * 1000)
-    _cache.put(
-        ChunkStatus(
-            chunk_id=chunk_id,
-            status="pending",
-            received_ms=now_ms,
-            expected_frame_count=int(header.get("expected_frame_count", 0)),
+      - a chunk that is the next contiguous sequence is emitted immediately;
+      - the lowest buffered chunk is emitted once it has been held hold_seconds
+        (the gap-filler is presumed lost) or once max_reorder_buffer chunks
+        pile up — so one missing chunk can never stall the pipeline forever.
+    """
+
+    def __init__(
+        self,
+        cfg: ReceiverConfig | None = None,
+        max_reorder_buffer: int = 8,
+        hold_seconds: float = 2.0,
+    ) -> None:
+        self._cfg = cfg or ReceiverConfig.from_yaml()
+        self._cache = StatusCache(ttl_seconds=self._cfg.status_cache_ttl_seconds)
+        self._id_queue: "queue.Queue[str | None]" = queue.Queue()
+        self._worker = HealthcheckWorker(
+            self._cfg, self._cache, self._id_queue, on_validated=self._on_validated
         )
-    )
-    _queue.put(chunk_id)
+        self._app = create_app(self._cfg, self._cache, self._id_queue, self._worker)
 
-    logger.info(
-        "Received %s — %.1f MB, expected %d frames, encoding=%s",
-        chunk_id,
-        bytes_written / 1024 / 1024,
-        header.get("expected_frame_count", 0),
-        header.get("encoding", "?"),
-    )
-    return {
-        "status": "received",
-        "chunk_id": chunk_id,
-        "timestamp_received_ms": now_ms,
-        "message": "Chunk queued for healthcheck",
-    }
+        self._out_queue: "queue.Queue[str | None]" = queue.Queue()
+        self._server: "Any | None" = None
+        self._thread: threading.Thread | None = None
 
+        # Reorder state (guarded by _lock)
+        self._max_reorder_buffer = max_reorder_buffer
+        self._hold_seconds = hold_seconds
+        self._lock = threading.Lock()
+        self._pending: dict[int, tuple[str, float]] = {}   # seq -> (path, buffered_at)
+        self._last_emitted: int | None = None              # highest seq emitted so far
+        self._fallback_seq = -1                            # for ids without a numeric suffix
+        self._release_thread: threading.Thread | None = None
+        self._release_stop = threading.Event()
 
-@app.get("/api/v1/chunks/{chunk_id}/status")
-async def get_chunk_status(chunk_id: str) -> JSONResponse:
-    """
-    Return validation state for a previously-uploaded chunk.
+    def start(self) -> "queue.Queue[str | None]":
+        """Start the embedded uvicorn server + release thread. Returns the validated-chunk path queue."""
+        import uvicorn
 
-    Returns 200 OK with status "healthy" or "unhealthy" once validation completes,
-    202 Accepted with status "pending" while the worker is still processing,
-    404 Not Found if the chunk_id was never uploaded.
-    """
-    status = _cache.get(chunk_id)
-    if status is None:
-        raise HTTPException(status_code=404, detail=f"Unknown chunk_id: {chunk_id}")
-    if status.status == "pending":
-        return JSONResponse(status_code=202, content=status.to_dict())
-    return JSONResponse(status_code=200, content=status.to_dict())
+        config = uvicorn.Config(
+            self._app,
+            host=self._cfg.host,
+            port=self._cfg.port,
+            log_level="info",
+        )
+        self._server = uvicorn.Server(config)
+        self._thread = threading.Thread(
+            target=self._server.run, name="chunk-receiver-uvicorn", daemon=True
+        )
+        self._thread.start()
+        self._release_stop.clear()
+        self._release_thread = threading.Thread(
+            target=self._release_loop, name="chunk-reorder-release", daemon=True
+        )
+        self._release_thread.start()
+        logger.info(
+            "ChunkReceiverSource listening on %s:%d (storage=%s)",
+            self._cfg.host, self._cfg.port, self._cfg.storage_root,
+        )
+        return self._out_queue
 
+    def stop(self) -> None:
+        """Stop the server + release thread, flush any buffered chunks in order, then enqueue the sentinel."""
+        if self._server is not None:
+            self._server.should_exit = True
+        if self._thread is not None:
+            self._thread.join(timeout=10.0)
+        self._release_stop.set()
+        if self._release_thread is not None:
+            self._release_thread.join(timeout=5.0)
+        with self._lock:
+            for seq in sorted(self._pending):
+                self._out_queue.put(self._pending[seq][0])
+            self._pending.clear()
+        self._out_queue.put(None)
 
-@app.get("/healthz")
-async def healthz() -> dict[str, Any]:
-    """Liveness probe — returns the receiver's resolved config so you can confirm it's running."""
-    return {
-        "status": "ok",
-        "host": _cfg.host,
-        "port": _cfg.port,
-        "storage_root": str(_cfg.storage_root),
-        "frame_count_tolerance": _cfg.frame_count_tolerance,
-        "workers": _cfg.healthcheck_workers,
-    }
+    def _parse_seq(self, chunk_id: str) -> int:
+        """Extract the trailing integer of a chunk_id; fall back to a monotonic counter."""
+        match = re.search(r"(\d+)$", chunk_id)
+        if match:
+            return int(match.group(1))
+        self._fallback_seq += 1
+        return self._fallback_seq
+
+    def _on_validated(self, status: ChunkStatus) -> None:
+        """HealthcheckWorker callback — buffer healthy chunks; the release thread emits them in order."""
+        if status.status != "healthy":
+            return
+        mp4_path = self._cfg.storage_root / "validated" / f"{status.chunk_id}.mp4"
+        seq = self._parse_seq(status.chunk_id)
+        with self._lock:
+            self._pending[seq] = (str(mp4_path), time.monotonic())
+            self._release_ready_locked()
+
+    def _release_loop(self) -> None:
+        """Periodically release buffered chunks whose hold timer has elapsed."""
+        while not self._release_stop.is_set():
+            with self._lock:
+                self._release_ready_locked()
+            self._release_stop.wait(0.25)
+
+    def _release_ready_locked(self) -> None:
+        """
+        Emit buffered chunks in ascending seq order. Caller must hold _lock.
+
+        A chunk is released when it is the next contiguous sequence, or when the
+        lowest buffered chunk has been held past hold_seconds / the buffer is full
+        (gap-skip — emit lowest and advance past it).
+        """
+        now = time.monotonic()
+        while self._pending:
+            lowest = min(self._pending)
+            path, buffered_at = self._pending[lowest]
+
+            contiguous = self._last_emitted is not None and lowest == self._last_emitted + 1
+            timed_out = (now - buffered_at) >= self._hold_seconds
+            buffer_full = len(self._pending) > self._max_reorder_buffer
+
+            if contiguous:
+                pass  # in-order, emit immediately
+            elif self._last_emitted is None and (timed_out or buffer_full):
+                pass  # first emission — start at the lowest we've settled on
+            elif timed_out or buffer_full:
+                logger.warning(
+                    "Releasing chunk seq %d out of order (was expecting %s; %d buffered)",
+                    lowest,
+                    "?" if self._last_emitted is None else self._last_emitted + 1,
+                    len(self._pending),
+                )
+            else:
+                break  # wait for the gap to fill or the hold timer to elapse
+
+            self._out_queue.put(path)
+            self._pending.pop(lowest)
+            self._last_emitted = lowest
 
 
 # ---------------------------------------------------------------------------

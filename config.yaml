@@ -46,6 +46,14 @@ sources:
 #     fps: 30
 #     team: "A"
 
+# Android HTTP-chunk example (phone uploads MP4 chunks to the receiver below):
+# When a source of type "http_chunks" is present, `python src/app.py` runs the
+# embedded receiver and feeds validated chunks straight into the pipeline.
+# Receiver bind/storage settings live in the `receiver:` block further down.
+#   - name: "phone_1"
+#     type: "http_chunks"
+#     team: "A"
+
 # ---------------------------------------------------------------------------
 # Detection model
 # Switch `backend` between "yolo" and "rfdetr" to change the detection engine.
