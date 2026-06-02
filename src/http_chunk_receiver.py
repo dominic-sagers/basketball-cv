@@ -31,6 +31,7 @@ import logging
 import queue
 import re
 import shutil
+import socket
 import threading
 import time
 import zlib
@@ -581,6 +582,7 @@ class ChunkReceiverSource:
         """Start the embedded uvicorn server + release thread. Returns the validated-chunk path queue."""
         import uvicorn
 
+        self._check_port_available()
         config = uvicorn.Config(
             self._app,
             host=self._cfg.host,
@@ -592,6 +594,7 @@ class ChunkReceiverSource:
             target=self._server.run, name="chunk-receiver-uvicorn", daemon=True
         )
         self._thread.start()
+        self._wait_for_server_started(timeout=5.0)
         self._release_stop.clear()
         self._release_thread = threading.Thread(
             target=self._release_loop, name="chunk-reorder-release", daemon=True
@@ -602,6 +605,39 @@ class ChunkReceiverSource:
             self._cfg.host, self._cfg.port, self._cfg.storage_root,
         )
         return self._out_queue
+
+    def _check_port_available(self) -> None:
+        """Pre-bind to surface port collisions with a clear error before uvicorn swallows them in its thread."""
+        if self._cfg.port == 0:
+            return
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            probe.bind((self._cfg.host, self._cfg.port))
+        except OSError as exc:
+            raise OSError(
+                f"Cannot bind {self._cfg.host}:{self._cfg.port} — another process "
+                f"(likely a standalone receiver) is already using it. Stop that "
+                f"process or change receiver.port in config.yaml."
+            ) from exc
+        finally:
+            probe.close()
+
+    def _wait_for_server_started(self, timeout: float) -> None:
+        """Block until uvicorn reports started, or raise if it never does (e.g. bind failed inside the thread)."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if getattr(self._server, "started", False):
+                return
+            if self._thread is not None and not self._thread.is_alive():
+                raise RuntimeError(
+                    "Receiver server thread exited before startup completed — "
+                    "check logs for the underlying error."
+                )
+            time.sleep(0.05)
+        raise RuntimeError(
+            f"Receiver did not start within {timeout:.1f}s on "
+            f"{self._cfg.host}:{self._cfg.port}."
+        )
 
     def stop(self) -> None:
         """Stop the server + release thread, flush any buffered chunks in order, then enqueue the sentinel."""

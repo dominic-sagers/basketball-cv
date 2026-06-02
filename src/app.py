@@ -297,8 +297,16 @@ class PipelineWorker(QThread):
                 raw_out = None
 
         # 3. Delete raw source chunks (both annotated and raw concat are done)
+        # RTSP chunks live in cam_chunk_dir; http_chunks live in store/chunks/validated/
+        # under whatever names the phone assigned, so delete them by actual path
+        # (plus the .json sidecar the receiver writes alongside each chunk).
         for f in Path(cam_chunk_dir).glob("chunk_*.mp4"):
             Path(f).unlink(missing_ok=True)
+        if self._source_kind == "http_chunks":
+            for chunk_path in raw_chunks:
+                p = Path(chunk_path)
+                p.unlink(missing_ok=True)
+                p.with_suffix(".json").unlink(missing_ok=True)
 
         # 4. Write event log JSON
         log_out: str | None = None
