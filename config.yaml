@@ -46,6 +46,14 @@ sources:
 #     fps: 30
 #     team: "A"
 
+# Android HTTP-chunk example (phone uploads MP4 chunks to the receiver below):
+# When a source of type "http_chunks" is present, `python src/app.py` runs the
+# embedded receiver and feeds validated chunks straight into the pipeline.
+# Receiver bind/storage settings live in the `receiver:` block further down.
+#   - name: "phone_1"
+#     type: "http_chunks"
+#     team: "A"
+
 # ---------------------------------------------------------------------------
 # Detection model
 # Switch `backend` between "yolo" and "rfdetr" to change the detection engine.
@@ -139,6 +147,23 @@ highlights:
   post_seconds: 5              # seconds of footage after each basket
   min_gap_seconds: 3           # events within this gap are merged into one clip
   out_dir: null                # null = <raw_video_dir>/highlights/
+
+# ---------------------------------------------------------------------------
+# Android frontend receiver (src/http_chunk_receiver.py)
+# FastAPI server that accepts chunked MP4 uploads from the Android recorder app
+# and validates them before handing off to the detection pipeline.
+# ---------------------------------------------------------------------------
+receiver:
+  host: "0.0.0.0"              # bind address; 0.0.0.0 = all interfaces (LAN + Tailscale)
+  port: 8000                   # matches Android client's DEFAULT_BACKEND_URL
+  storage_root: "store/chunks/"
+                               # received/   — raw uploads (chunk_id.mp4 + .json + .crc32)
+                               # validated/  — chunks that passed healthcheck
+                               # failed/     — chunks that failed (kept for debugging)
+  frame_count_tolerance: 0.05  # accept chunks whose ffprobe frame count is within ±5%
+                               # of expected_frame_count from chunk header
+  healthcheck_workers: 2       # background threads draining the validation queue
+  status_cache_ttl_seconds: 3600 # how long to keep healthcheck results in memory
 
 # ---------------------------------------------------------------------------
 # Output

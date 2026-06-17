@@ -109,6 +109,7 @@ class PipelineWorker(QThread):
         save_output: str | None,
         camera_team: str = "A",
         face_blur_enabled: bool = False,
+        source_kind: str = "rtsp",
     ) -> None:
         super().__init__()
         self._cfg = cfg
@@ -118,6 +119,9 @@ class PipelineWorker(QThread):
         self._save_output = save_output
         self._camera_team = camera_team.upper()
         self._face_blur_enabled = face_blur_enabled
+        # "rtsp": record an RTSP/HTTP stream with StreamChunkRecorder.
+        # "http_chunks": consume validated MP4 chunks uploaded by the Android app.
+        self._source_kind = source_kind
         self._stop_event = threading.Event()
         self._score_adjustments: list[tuple[str, int]] = []
         self._score_lock = threading.Lock()
@@ -205,18 +209,27 @@ class PipelineWorker(QThread):
         self.game_state = GameState.from_config(self._cfg)
         face_blur = FaceBlur() if self._face_blur_enabled else None
 
-        # Use a camera-specific chunk subdirectory so two workers don't collide
+        # Use a camera-specific chunk subdirectory so two workers don't collide.
+        # (For http_chunks the recorder writes validated chunks elsewhere; this dir
+        #  stays empty and is harmless to the post-session cleanup glob.)
         cam_chunk_dir = str(Path(self._chunk_dir) / f"cam{self._camera_team}")
-        recorder = StreamChunkRecorder(
-            url=self._rtsp_url,
-            chunk_dir=cam_chunk_dir,
-            chunk_seconds=self._chunk_seconds,
-            preview_callback=lambda f: self.raw_frame_ready.emit(f),
-        )
+        if self._source_kind == "http_chunks":
+            from src.http_chunk_receiver import ChunkReceiverSource, ReceiverConfig
+            recorder = ChunkReceiverSource(ReceiverConfig.from_yaml())
+            self.status_changed.emit(
+                f"[Cam {self._camera_team}] Waiting for phone uploads …  |  Press Stop to end"
+            )
+        else:
+            recorder = StreamChunkRecorder(
+                url=self._rtsp_url,
+                chunk_dir=cam_chunk_dir,
+                chunk_seconds=self._chunk_seconds,
+                preview_callback=lambda f: self.raw_frame_ready.emit(f),
+            )
+            self.status_changed.emit(
+                f"[Cam {self._camera_team}] Recording + processing …  |  Press Stop to end"
+            )
         chunk_queue = recorder.start()
-        self.status_changed.emit(
-            f"[Cam {self._camera_team}] Recording + processing …  |  Press Stop to end"
-        )
 
         save_path_base = Path(self._save_output) if self._save_output else None
         if save_path_base:
@@ -284,8 +297,16 @@ class PipelineWorker(QThread):
                 raw_out = None
 
         # 3. Delete raw source chunks (both annotated and raw concat are done)
+        # RTSP chunks live in cam_chunk_dir; http_chunks live in store/chunks/validated/
+        # under whatever names the phone assigned, so delete them by actual path
+        # (plus the .json sidecar the receiver writes alongside each chunk).
         for f in Path(cam_chunk_dir).glob("chunk_*.mp4"):
             Path(f).unlink(missing_ok=True)
+        if self._source_kind == "http_chunks":
+            for chunk_path in raw_chunks:
+                p = Path(chunk_path)
+                p.unlink(missing_ok=True)
+                p.with_suffix(".json").unlink(missing_ok=True)
 
         # 4. Write event log JSON
         log_out: str | None = None
@@ -576,6 +597,7 @@ class BasketballApp(QMainWindow):
         chunk_dir: str,
         save_output: str | None,
         camera2_team: str = "B",
+        source_kind: str = "rtsp",
     ) -> None:
         super().__init__()
         self._cfg = cfg
@@ -585,6 +607,7 @@ class BasketballApp(QMainWindow):
         self._chunk_dir  = chunk_dir
         self._save_output = save_output
         self._camera2_team = camera2_team.upper()
+        self._source_kind = source_kind
 
         # Authoritative score — both workers and manual buttons update this
         self._score: dict[str, int] = {"A": 0, "B": 0}
@@ -710,6 +733,7 @@ class BasketballApp(QMainWindow):
             chunk_dir=chunk_dir,
             save_output=save_output,
             camera_team=team,
+            source_kind=self._source_kind,
         )
         w.score_event.connect(self._on_score_event)
         w.fps_updated.connect(self._control_panel.set_fps)
@@ -795,6 +819,10 @@ def main() -> None:
                         help="Camera B RTSP/HTTP stream URL (Team B basket) — optional")
     parser.add_argument("--rtsp2-team", metavar="A|B", default="B",
                         help="Which team Camera B's basket belongs to (default: B)")
+    parser.add_argument("--source", metavar="KIND", default="rtsp",
+                        choices=("rtsp", "http_chunks"),
+                        help="Chunk source: 'rtsp' (record a stream) or "
+                             "'http_chunks' (consume Android uploads). Default: rtsp")
     parser.add_argument("--chunk-seconds", type=float, default=5.0, metavar="SECS")
     parser.add_argument("--chunk-dir", metavar="DIR", default="store/output/stream-chunks")
     parser.add_argument("--save-output", metavar="PATH", default="store/output/game.mp4")
@@ -803,16 +831,25 @@ def main() -> None:
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
 
-    # Resolve Camera A URL: CLI > first rtsp source in config
-    rtsp_url = args.rtsp
-    if not rtsp_url:
-        for src in cfg.get("sources", []):
-            if src.get("type") == "rtsp":
-                rtsp_url = src["url"]
-                break
-    if not rtsp_url:
-        print("ERROR: provide --rtsp URL or define an rtsp source in config.yaml")
-        sys.exit(1)
+    # If config declares an http_chunks source and the user didn't override --source,
+    # switch to consuming Android uploads automatically.
+    source_kind = args.source
+    if source_kind == "rtsp" and any(
+        s.get("type") == "http_chunks" for s in cfg.get("sources", [])
+    ):
+        source_kind = "http_chunks"
+
+    rtsp_url = args.rtsp or ""
+    if source_kind == "rtsp":
+        # Resolve Camera A URL: CLI > first rtsp source in config
+        if not rtsp_url:
+            for src in cfg.get("sources", []):
+                if src.get("type") == "rtsp":
+                    rtsp_url = src["url"]
+                    break
+        if not rtsp_url:
+            print("ERROR: provide --rtsp URL or define an rtsp source in config.yaml")
+            sys.exit(1)
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
@@ -820,11 +857,12 @@ def main() -> None:
     window = BasketballApp(
         cfg=cfg,
         rtsp_url=rtsp_url,
-        rtsp_url2=args.rtsp2,
+        rtsp_url2=args.rtsp2 if source_kind == "rtsp" else None,
         chunk_seconds=args.chunk_seconds,
         chunk_dir=args.chunk_dir,
         save_output=args.save_output,
         camera2_team=args.rtsp2_team,
+        source_kind=source_kind,
     )
     window.show()
     sys.exit(app.exec())
