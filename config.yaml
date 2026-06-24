@@ -128,7 +128,7 @@ tracking:
 court:
   width_ft: 94
   height_ft: 50
-  homography_points: []        # filled after camera calibration
+  calibration_dir: "store/calibration"   # where calibrate_zone.py saves its output
 
 # ---------------------------------------------------------------------------
 # Event detection thresholds (all tunable without touching source code)
