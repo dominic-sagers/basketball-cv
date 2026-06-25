@@ -110,6 +110,7 @@ class PipelineWorker(QThread):
         camera_team: str = "A",
         face_blur_enabled: bool = False,
         source_kind: str = "rtsp",
+        run_id: str | None = None,
     ) -> None:
         super().__init__()
         self._cfg = cfg
@@ -122,6 +123,7 @@ class PipelineWorker(QThread):
         # "rtsp": record an RTSP/HTTP stream with StreamChunkRecorder.
         # "http_chunks": consume validated MP4 chunks uploaded by the Android app.
         self._source_kind = source_kind
+        self._run_id = run_id
         self._stop_event = threading.Event()
         self._score_adjustments: list[tuple[str, int]] = []
         self._score_lock = threading.Lock()
@@ -295,6 +297,12 @@ class PipelineWorker(QThread):
             raw_out = str(save_path_base.with_stem(save_path_base.stem + "_raw"))
             if not _concat_chunks(raw_chunks, raw_out):
                 raw_out = None
+
+        # 2a. Archive raw game footage → store/footage/games/<run_id>_cam{A|B}.mp4
+        if raw_out and self._run_id:
+            from src.game_archive import archive_raw_game, dvc_push
+            archive_raw_game(raw_out, self._run_id, self._camera_team)
+            threading.Thread(target=dvc_push, daemon=True).start()
 
         # 3. Delete raw source chunks (both annotated and raw concat are done)
         # RTSP chunks live in cam_chunk_dir; http_chunks live in store/chunks/validated/
@@ -725,7 +733,7 @@ class BasketballApp(QMainWindow):
 
     # ── Pipeline control ────────────────────────────────────────────────────
 
-    def _make_worker(self, url: str, team: str, save_output: str | None, chunk_dir: str) -> PipelineWorker:
+    def _make_worker(self, url: str, team: str, save_output: str | None, chunk_dir: str, run_id: str | None = None) -> PipelineWorker:
         w = PipelineWorker(
             cfg=self._cfg,
             rtsp_url=url,
@@ -734,6 +742,7 @@ class BasketballApp(QMainWindow):
             save_output=save_output,
             camera_team=team,
             source_kind=self._source_kind,
+            run_id=run_id,
         )
         w.score_event.connect(self._on_score_event)
         w.fps_updated.connect(self._control_panel.set_fps)
@@ -766,7 +775,7 @@ class BasketballApp(QMainWindow):
         logger.info("Run ID: %s", run_id)
 
         # Camera A — always present
-        self._worker = self._make_worker(self._rtsp_url, "A", run_save, run_chunks)
+        self._worker = self._make_worker(self._rtsp_url, "A", run_save, run_chunks, run_id)
         self._worker.frame_ready.connect(self._video_a.update_frame)
         self._worker.raw_frame_ready.connect(self._video_raw_a.update_frame)
         self._worker.finished.connect(self._on_worker_finished)
@@ -774,7 +783,7 @@ class BasketballApp(QMainWindow):
 
         # Camera B — only if a second URL was provided
         if self._rtsp_url2:
-            self._worker2 = self._make_worker(self._rtsp_url2, self._camera2_team, run_save, run_chunks)
+            self._worker2 = self._make_worker(self._rtsp_url2, self._camera2_team, run_save, run_chunks, run_id)
             self._worker2.frame_ready.connect(self._video_b.update_frame)
             self._worker2.raw_frame_ready.connect(self._video_raw_b.update_frame)
             self._worker2.finished.connect(self._on_worker_finished)
