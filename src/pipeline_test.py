@@ -209,7 +209,7 @@ def run_pipeline(
         logger.error("[%s] Failed to open source.", source.name)
         return {"ok": False}
 
-    viz = Visualizer()
+    viz = Visualizer(three_point_zone=game_state.three_point_zone if game_state else None)
     writer: cv2.VideoWriter | None = None
     raw_writer: cv2.VideoWriter | None = None
     frame_log: list[dict] = []

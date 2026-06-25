@@ -174,6 +174,10 @@ class GameState:
     # ------------------------------------------------------------------
 
     @property
+    def three_point_zone(self) -> "ThreePointZone | None":
+        return self._three_point_zone
+
+    @property
     def total_makes(self) -> int:
         return sum(1 for e in self.events if e.event_type == "score")
 
