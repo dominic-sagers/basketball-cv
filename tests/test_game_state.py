@@ -2,20 +2,22 @@
 Tests for GameState — the team-level scoring/event logic (Phase 1).
 
 This is the closest thing to the event-rule engine right now (event_logic.py
-doesn't exist yet), so the make-detection, cooldown debounce, and team-mapping
-behaviour are pinned down here.
+doesn't exist yet), so the make-detection, cooldown debounce, team-mapping,
+and 2pt/3pt classification behaviour are pinned down here.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from src.game_state import GameState
+from src.three_point_zone import ThreePointZone
 
 
 @dataclass
 class FakeTrack:
-    """Stands in for a Tracker Track — process_frame only reads .class_name."""
+    """Stands in for a Tracker Track."""
     class_name: str
+    bbox: tuple[int, int, int, int] = field(default_factory=lambda: (0, 0, 10, 10))
 
 
 BALL = [FakeTrack("Ball_in_Basket")]
@@ -108,3 +110,105 @@ def test_reset_clears_state():
     assert gs.events == []
     assert gs.last_event is None
     assert gs.total_makes == 0
+
+
+# ---------------------------------------------------------------------------
+# 2pt / 3pt classification via ThreePointZone
+# ---------------------------------------------------------------------------
+
+import math
+
+
+def _simple_zone(radius: float = 2.0) -> ThreePointZone:
+    """Circular arc at `radius` basket-widths — easy to reason about in tests."""
+    n = 9
+    angles = [math.radians(-90 + 180 * i / (n - 1)) for i in range(n)]
+    return ThreePointZone([(radius * math.cos(a), radius * math.sin(a)) for a in angles])
+
+
+def _basket_track(cx: int = 100, cy: int = 100, w: int = 20) -> FakeTrack:
+    """A Basket track centred at (cx, cy) with width w."""
+    half = w // 2
+    return FakeTrack("Basket", bbox=(cx - half, cy - half, cx + half, cy + half))
+
+
+def _shooter_track(foot_x: int, foot_y: int) -> FakeTrack:
+    """A Player_Shooting track whose foot lands at (foot_x, foot_y)."""
+    return FakeTrack("Player_Shooting", bbox=(foot_x - 10, foot_y - 40, foot_x + 10, foot_y))
+
+
+def test_no_zone_always_scores_two():
+    gs = GameState(shot_cooldown_frames=0, three_point_zone=None)
+    fired = gs.process_frame(BALL, frame_number=0)
+    assert fired[0].points == 2
+
+
+def test_zone_present_no_shooter_history_scores_two():
+    gs = GameState(shot_cooldown_frames=0, three_point_zone=_simple_zone())
+    tracks = [FakeTrack("Ball_in_Basket"), _basket_track()]
+    fired = gs.process_frame(tracks, frame_number=0)
+    assert fired[0].points == 2
+
+
+def test_zone_present_no_basket_in_frame_scores_two():
+    gs = GameState(shot_cooldown_frames=0, three_point_zone=_simple_zone())
+    # Frame 0: shooter recorded but no basket
+    gs.process_frame([_shooter_track(100, 150)], frame_number=0)
+    # Frame 1: ball in basket but still no basket bbox
+    fired = gs.process_frame([FakeTrack("Ball_in_Basket")], frame_number=1)
+    assert fired[0].points == 2
+
+
+def test_shooter_inside_arc_scores_two():
+    # Basket at (100, 100), width 20 → arc radius = 40px
+    # Shooter foot at (100, 120) = 20px below basket → inside arc
+    gs = GameState(shot_cooldown_frames=0, three_point_zone=_simple_zone(radius=2.0))
+    basket = _basket_track(cx=100, cy=100, w=20)
+    shooter = _shooter_track(foot_x=100, foot_y=120)   # 20px from basket < 40px arc
+
+    gs.process_frame([shooter, basket], frame_number=0)
+    fired = gs.process_frame([FakeTrack("Ball_in_Basket"), basket], frame_number=1)
+    assert fired[0].points == 2
+    assert gs.score["A"] == 2
+
+
+def test_shooter_outside_arc_scores_three():
+    # Shooter foot at (100, 165) = 65px below basket → outside 40px arc
+    gs = GameState(shot_cooldown_frames=0, three_point_zone=_simple_zone(radius=2.0))
+    basket = _basket_track(cx=100, cy=100, w=20)
+    shooter = _shooter_track(foot_x=100, foot_y=165)   # 65px from basket > 40px arc
+
+    gs.process_frame([shooter, basket], frame_number=0)
+    fired = gs.process_frame([FakeTrack("Ball_in_Basket"), basket], frame_number=1)
+    assert fired[0].points == 3
+    assert gs.score["A"] == 3
+
+
+def test_three_point_score_accumulates_correctly():
+    gs = GameState(shot_cooldown_frames=0, three_point_zone=_simple_zone(radius=2.0))
+    basket = _basket_track(cx=100, cy=100, w=20)
+    shooter = _shooter_track(foot_x=100, foot_y=165)
+
+    for frame in range(0, 6, 2):
+        gs.process_frame([shooter, basket], frame_number=frame)
+        gs.process_frame([FakeTrack("Ball_in_Basket"), basket], frame_number=frame + 1)
+
+    assert gs.score["A"] == 9   # 3 × 3pt
+    assert gs.total_makes == 3
+
+
+def test_shooter_history_uses_most_recent_position():
+    """Earlier inside-arc position is overwritten by later outside-arc position."""
+    gs = GameState(shot_cooldown_frames=0, three_point_zone=_simple_zone(radius=2.0))
+    basket = _basket_track(cx=100, cy=100, w=20)
+
+    gs.process_frame([_shooter_track(100, 120), basket], frame_number=0)  # inside
+    gs.process_frame([_shooter_track(100, 165), basket], frame_number=1)  # outside (most recent)
+    fired = gs.process_frame([FakeTrack("Ball_in_Basket"), basket], frame_number=2)
+    assert fired[0].points == 3
+
+
+def test_three_point_zone_property_exposed():
+    zone = _simple_zone()
+    gs = GameState(three_point_zone=zone)
+    assert gs.three_point_zone is zone

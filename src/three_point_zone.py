@@ -116,7 +116,7 @@ class ThreePointZone:
         # Arc boundary squared distance in same direction
         arc_dist_sq = (nearest_pt[0] - bcx) ** 2 + (nearest_pt[1] - bcy) ** 2
 
-        return player_dist_sq > arc_dist_sq
+        return bool(player_dist_sq > arc_dist_sq)
 
     def classify(
         self,
