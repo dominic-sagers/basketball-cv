@@ -298,10 +298,9 @@ class PipelineWorker(QThread):
             if not _concat_chunks(raw_chunks, raw_out):
                 raw_out = None
 
-        # 2a. Archive raw game footage → store/footage/games/<run_id>_cam{A|B}.mp4
+        # 2a. Push to DVC remote so the clip viewer picks up this session
         if raw_out and self._run_id:
-            from src.game_archive import archive_raw_game, dvc_push
-            archive_raw_game(raw_out, self._run_id, self._camera_team)
+            from src.game_archive import dvc_push
             threading.Thread(target=dvc_push, daemon=True).start()
 
         # 3. Delete raw source chunks (both annotated and raw concat are done)
