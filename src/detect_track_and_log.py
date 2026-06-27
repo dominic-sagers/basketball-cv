@@ -767,7 +767,8 @@ def main() -> None:
                 inference_every=args.inference_every,
             )
 
-            _log_benchmark(result, source.name, args.file, cfg)
+            if result.get("ok") and result.get("frames", 0) > 0:
+                _log_benchmark(result, source.name, args.file, cfg)
 
             # Reset tracker state between sources so IDs don't bleed across
             if tracker is not None:
