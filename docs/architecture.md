@@ -58,7 +58,7 @@
 - `from_config(cfg)` — reads `event_logic.shot_cooldown_frames` from config
 - Each `PipelineWorker` has its own independent `GameState`; the Qt app owns the authoritative merged score
 
-### `src/pipeline_test.py`
+### `src/detect_track_and_log.py`
 - End-to-end loop: source → detect/track → game_state → visualize → optional output
 - `run_pipeline()` — core loop; accepts `frame_callback`, `stop_event`, `save_raw_path`, and `frame_offset` for Qt integration and highlight support
 - `--save-output PATH` — write annotated mp4; auto-creates a timestamped run directory alongside it

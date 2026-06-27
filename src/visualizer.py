@@ -2,7 +2,7 @@
 visualizer.py — real-time overlay rendering for the basketball CV pipeline.
 
 Draws detection and tracking results onto frames for debugging and monitoring.
-Designed to be used both during development (pipeline_test.py) and optionally
+Designed to be used both during development (detect_track_and_log.py) and optionally
 in production to show a debug feed alongside the scoreboard.
 
 Features:

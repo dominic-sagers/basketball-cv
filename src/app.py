@@ -49,7 +49,7 @@ from PyQt6.QtWidgets import (
 from src.game_state import GameState
 from src.tracker import Tracker
 from src.video_source import FileVideoSource, StreamChunkRecorder
-from src.pipeline_test import run_pipeline, _concat_chunks
+from src.detect_track_and_log import run_pipeline, _concat_chunks
 from src.face_blur import FaceBlur
 
 logger = logging.getLogger(__name__)

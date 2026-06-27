@@ -1,34 +1,33 @@
 """
-pipeline_test.py — end-to-end pipeline test: source → detect/track → visualize.
+detect_track_and_log.py — run detection and tracking on footage, producing an
+annotated output video and a JSON event log for the highlight maker.
 
 Runs the full processing chain on any configured source (file, RTSP, or USB)
-and displays the annotated output. Use this to verify detection quality and
-tracking stability before building event logic on top.
-
-This script is also the right place to record annotated output clips for
-reviewing detection/tracking quality offline.
+and displays the annotated output. Use this to verify detection quality,
+review tracking stability, and generate event logs for downstream tools
+(highlight_maker.py, stat aggregation).
 
 Usage:
-    # Test all sources from config.yaml (one window per source, sequential)
-    python src/pipeline_test.py
+    # Run all sources from config.yaml (one window per source, sequential)
+    python src/detect_track_and_log.py
 
-    # Test a single source by name
-    python src/pipeline_test.py --source basket_1
+    # Run a single source by name
+    python src/detect_track_and_log.py --source basket_1
 
-    # Test with a one-off file (no config entry needed)
-    python src/pipeline_test.py --file test_footage/basket_1.mp4
+    # Run with a one-off file (no config entry needed)
+    python src/detect_track_and_log.py --file test_footage/basket_1.mp4
 
     # Detection only (no tracking — faster, useful for initial calibration)
-    python src/pipeline_test.py --detect-only
+    python src/detect_track_and_log.py --detect-only
 
     # Save annotated output to a file
-    python src/pipeline_test.py --file test_footage/basket_1.mp4 --save-output output/basket_1_annotated.mp4
+    python src/detect_track_and_log.py --file test_footage/basket_1.mp4 --save-output output/basket_1_annotated.mp4
 
     # Headless (no window — useful inside Docker, still prints FPS)
-    python src/pipeline_test.py --no-preview
+    python src/detect_track_and_log.py --no-preview
 
     # Slow down playback to inspect individual detections
-    python src/pipeline_test.py --file test_footage/basket_1.mp4 --playback-speed 0.25
+    python src/detect_track_and_log.py --file test_footage/basket_1.mp4 --playback-speed 0.25
 """
 
 from __future__ import annotations

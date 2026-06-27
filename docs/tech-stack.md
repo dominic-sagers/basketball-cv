@@ -175,7 +175,7 @@ dvc pull
 python -c "import torch; print(torch.cuda.get_device_name(0))"
 
 # 7. Run on a recorded file
-python src/pipeline_test.py --file store/footage/your_clip.mp4
+python src/detect_track_and_log.py --file store/footage/your_clip.mp4
 
 # 8. Launch the desktop app (requires phone running IP Webcam + Tailscale connected)
 python src/app.py --rtsp http://<phone-tailscale-ip>:8080/video --chunk-seconds 5

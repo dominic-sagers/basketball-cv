@@ -5,7 +5,7 @@ YOLOv8-face detects face bounding boxes on keyframes; SAM2 propagates pixel-prec
 masks across all frames. No login or gated models required — both download automatically.
 
 This is intentionally a post-processing step — run it on the annotated output
-from pipeline_test.py or app.py after a game session.
+from detect_track_and_log.py or app.py after a game session.
 
 Setup (one-time, automatic on first run):
     pip install sam2 ultralytics huggingface_hub

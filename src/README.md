@@ -9,7 +9,7 @@
 # 5. detector.py      — YOLOv11 wrapper ✓
 # 6. tracker.py       — ByteTrack wrapper ✓
 # 7. visualizer.py    — detection/tracking overlay ✓
-# 8. pipeline_test.py — source → detect/track → visualize ✓
+# 8. detect_track_and_log.py — source → detect/track → visualize ✓
 # 9. preprocessor.py  — frame preprocessing
 # 10. ball_tracker.py — ball + hoop logic
 # 11. pose_estimator.py

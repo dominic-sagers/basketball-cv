@@ -209,7 +209,7 @@ fine-tune on them. Gym fluorescent lighting, your camera angles, and your
 court markings are all distribution-shifted from the training data.
 
 **Recommended workflow:**
-1. Run `pipeline_test.py --save-output` to record annotated clips
+1. Run `detect_track_and_log.py --save-output` to record annotated clips
 2. Review frames where detections are wrong or missing
 3. Label those frames in Roboflow (free tier: up to 1,000 images/month)
 4. Export as YOLOv11 format and fine-tune:
@@ -240,7 +240,7 @@ quality for your specific setup.
 - Weights DVC-tracked on the remote — `dvc pull` to restore
 
 **Next:**
-1. **More data — your gym:** Run `pipeline_test.py --save-output` on real game footage.
+1. **More data — your gym:** Run `detect_track_and_log.py --save-output` on real game footage.
    Label frames where detection fails in Roboflow (free tier: 1,000 images/month).
    Even 200–300 frames from your court will push ball detection well past 50%.
    Use `python src/train.py` with the new dataset — fine-tuning from `basketball-ft.pt`
