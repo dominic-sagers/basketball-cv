@@ -37,6 +37,7 @@ import glob as _glob
 import json
 import logging
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -409,6 +410,48 @@ def run_pipeline(
 
 
 # ---------------------------------------------------------------------------
+# Benchmark logging
+# ---------------------------------------------------------------------------
+
+BENCHMARK_LOG = Path("store/benchmarks.jsonl")
+
+
+def _log_benchmark(result: dict, source_name: str, video_path: str | None, cfg: dict) -> None:
+    """Append one JSONL record to store/benchmarks.jsonl after a completed run."""
+    try:
+        import torch
+        device = cfg.get("model", {}).get("device", 0)
+        if torch.cuda.is_available() and isinstance(device, int):
+            gpu_name = torch.cuda.get_device_name(device)
+            gpu_vram_gb = round(torch.cuda.get_device_properties(device).total_memory / 1e9, 1)
+        else:
+            gpu_name = "cpu"
+            gpu_vram_gb = 0.0
+    except Exception:
+        gpu_name = "unknown"
+        gpu_vram_gb = 0.0
+
+    record = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "hostname": socket.gethostname(),
+        "gpu": gpu_name,
+        "gpu_vram_gb": gpu_vram_gb,
+        "source": source_name,
+        "video": Path(video_path).name if video_path else None,
+        "avg_fps": round(result["avg_fps"], 2),
+        "total_frames": result["frames"],
+        "duration_s": round(result["duration_s"], 1),
+        "imgsz": cfg.get("model", {}).get("input_size"),
+        "weights": Path(cfg.get("model", {}).get("weights", "")).name or None,
+    }
+
+    BENCHMARK_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with open(BENCHMARK_LOG, "a") as f:
+        f.write(json.dumps(record) + "\n")
+    logger.info("Benchmark logged → %s  (%.1f avg FPS on %s)", BENCHMARK_LOG, result["avg_fps"], gpu_name)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -446,6 +489,12 @@ def main() -> None:
                              "Required input for highlight_maker.py. In stream-buffer mode the "
                              "raw chunks are concatenated; in file mode a parallel writer is used.")
 
+    parser.add_argument(
+        "--device", metavar="DEVICE", default=None,
+        help="Override config.yaml model.device (e.g. 'cpu', '0', '1'). "
+             "Use 'cpu' on machines without a CUDA GPU.",
+    )
+
     # One-off source overrides
     grp = parser.add_argument_group("one-off source overrides")
     grp.add_argument("--file", metavar="PATH", help="Test a video file directly")
@@ -478,6 +527,10 @@ def main() -> None:
         logger.info("Auto save output: %s", args.save_output)
 
     model_cfg = cfg["model"]
+    if args.device is not None:
+        device_val = int(args.device) if args.device.isdigit() else args.device
+        model_cfg = {**model_cfg, "device": device_val}
+        logger.info("Device override: %s", device_val)
     tracking_cfg = cfg.get("tracking", {})
 
     # ── Load model ────────────────────────────────────────────────────────
@@ -699,7 +752,7 @@ def main() -> None:
             else:
                 log_path = None
 
-            run_pipeline(
+            result = run_pipeline(
                 source=source,
                 detector=detector,
                 tracker=tracker,
@@ -713,6 +766,8 @@ def main() -> None:
                 detect_only=detect_only,
                 inference_every=args.inference_every,
             )
+
+            _log_benchmark(result, source.name, args.file, cfg)
 
             # Reset tracker state between sources so IDs don't bleed across
             if tracker is not None:
