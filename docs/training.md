@@ -186,7 +186,7 @@ model:
 Then run the pipeline as normal:
 
 ```powershell
-python src/pipeline_test.py `
+python src/detect_track_and_log.py `
   --file "store/footage/basketballcv-sample-1.mov" `
   --no-preview `
   --save-output "store/output/sample-1-basketball-ft.mp4" `
@@ -242,7 +242,7 @@ basketball dataset — your gym's lighting, camera angles, and court markings
 are all different.
 
 Workflow:
-1. Use `pipeline_test.py --save-output` to capture annotated clips from real games
+1. Use `detect_track_and_log.py --save-output` to capture annotated clips from real games
 2. Label frames where detection fails in [Roboflow](https://app.roboflow.com) (free tier: 1,000 images/month)
 3. Export as YOLOv11 format and merge with the existing dataset
 4. Re-run training with `model="store/weights/basketball-ft/weights/best.pt"` as starting point

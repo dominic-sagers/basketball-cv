@@ -2,7 +2,7 @@
 visualizer.py — real-time overlay rendering for the basketball CV pipeline.
 
 Draws detection and tracking results onto frames for debugging and monitoring.
-Designed to be used both during development (pipeline_test.py) and optionally
+Designed to be used both during development (detect_track_and_log.py) and optionally
 in production to show a debug feed alongside the scoreboard.
 
 Features:
@@ -24,13 +24,16 @@ from __future__ import annotations
 import collections
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import cv2
 import numpy as np
 
 from src.detector import Detection
 from src.tracker import Track
+
+if TYPE_CHECKING:
+    from src.three_point_zone import ThreePointZone
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +118,7 @@ class Visualizer:
         trail_length: int = 40,
         box_thickness: int = 2,
         font_scale: float = 0.55,
+        three_point_zone: "ThreePointZone | None" = None,
     ) -> None:
         self._show_confidence = show_confidence
         self._show_track_ids = show_track_ids
@@ -122,6 +126,7 @@ class Visualizer:
         self._font_scale = font_scale
         self._font = cv2.FONT_HERSHEY_SIMPLEX
         self._ball_trail = BallTrail(maxlen=trail_length)
+        self._three_point_zone = three_point_zone
 
         # FPS smoothing
         self._fps_history: collections.deque[float] = collections.deque(maxlen=30)
@@ -191,6 +196,8 @@ class Visualizer:
 
         # Draw layers (order matters — trail under boxes)
         self._draw_trail(canvas)
+        if self._three_point_zone is not None and tracks:
+            self._draw_three_point_zone(canvas, tracks)
         if tracks:
             self._draw_tracks(canvas, tracks, team_assignments)
         elif detections:
@@ -204,6 +211,16 @@ class Visualizer:
     # ------------------------------------------------------------------
     # Drawing helpers
     # ------------------------------------------------------------------
+
+    def _draw_three_point_zone(self, canvas: np.ndarray, tracks: list[Track]) -> None:
+        """Overlay the 3pt arc if a basket is visible in this frame's tracks."""
+        for t in tracks:
+            if t.class_name in BASKET_CLASSES:
+                x1, y1, x2, y2 = t.bbox
+                basket_center = ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+                basket_width = float(x2 - x1)
+                self._three_point_zone.draw(canvas, basket_center, basket_width)  # type: ignore[union-attr]
+                break
 
     def _draw_tracks(
         self,

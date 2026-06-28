@@ -16,13 +16,20 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from src.three_point_zone import ThreePointZone
 
 logger = logging.getLogger(__name__)
 
 # Class names that indicate a made basket
 MADE_BASKET_CLASSES: frozenset[str] = frozenset({"Ball_in_Basket"})
+
+# How many frames back to look for the last shooter when a basket is detected
+_SHOOTER_LOOKBACK_FRAMES = 90  # ~3 seconds at 30 fps
 
 
 @dataclass
@@ -57,14 +64,27 @@ class GameState:
         self,
         shot_cooldown_frames: int = 45,
         source_team_map: dict[str, str] | None = None,
+        three_point_zone: "ThreePointZone | None" = None,
+        prefer_furthest_shooter: bool = True,
+        basket_min_confidence: float = 0.60,
+        basket_min_frames: int = 3,
     ) -> None:
         self.score: dict[str, int] = {"A": 0, "B": 0}
         self.events: list[GameEvent] = []
         self._shot_cooldown_frames = shot_cooldown_frames
         self._source_team_map = source_team_map or {}
+        self._three_point_zone = three_point_zone
+        self._prefer_furthest_shooter = prefer_furthest_shooter
+        self._basket_min_confidence = basket_min_confidence
+        self._basket_min_frames = basket_min_frames
+        self._basket_streak: int = 0
         self._cooldown_remaining: int = 0
         self._session_start = time.time()
         self._last_event: GameEvent | None = None
+        # Rolling buffer of (frame_number, foot_xy) for Player_Shooting detections
+        self._shooter_history: deque[tuple[int, tuple[float, float]]] = deque(
+            maxlen=_SHOOTER_LOOKBACK_FRAMES
+        )
 
     # ------------------------------------------------------------------
     # Frame update
@@ -96,34 +116,83 @@ class GameState:
         timestamp_s = round(time.time() - self._session_start, 2)
         fired: list[GameEvent] = []
 
-        ball_in_basket = any(
-            t.class_name in MADE_BASKET_CLASSES for t in tracks
+        # Record any Player_Shooting detections for 2pt/3pt lookback
+        for t in tracks:
+            if t.class_name == "Player_Shooting":
+                x1, y1, x2, y2 = t.bbox
+                foot_xy = ((x1 + x2) / 2.0, float(y2))  # bottom-centre = approx floor
+                self._shooter_history.append((frame_number, foot_xy))
+
+        confident_basket = any(
+            t.class_name in MADE_BASKET_CLASSES and t.confidence >= self._basket_min_confidence
+            for t in tracks
         )
 
+        if confident_basket:
+            self._basket_streak += 1
+        else:
+            self._basket_streak = 0
+
+        ball_in_basket = confident_basket and self._basket_streak >= self._basket_min_frames
+
         if ball_in_basket and self._cooldown_remaining == 0:
+            points = self._classify_shot(tracks, frame_number)
+            detail = f"{points}pt — Ball_in_Basket detected by {source_name or 'camera'}"
             event = GameEvent(
                 frame=frame_number,
                 timestamp_s=timestamp_s,
                 event_type="score",
                 team=team,
-                points=2,
-                detail=f"Ball_in_Basket detected by {source_name or 'camera'}",
+                points=points,
+                detail=detail,
             )
-            self.score[team] += 2
+            self.score[team] += points
             self._cooldown_remaining = self._shot_cooldown_frames
             self._last_event = event
             self.events.append(event)
             fired.append(event)
             logger.info(
-                "SCORE — Team %s +2  |  Score: A %d – B %d  (frame %d)",
-                team, self.score["A"], self.score["B"], frame_number,
+                "SCORE — Team %s +%d  |  Score: A %d – B %d  (frame %d)",
+                team, points, self.score["A"], self.score["B"], frame_number,
             )
 
         return fired
 
+    def _classify_shot(self, tracks: list[Any], frame_number: int) -> int:
+        """
+        Return 2 or 3 for the most recent shooter position vs the 3pt zone.
+
+        Falls back to 2 if the zone is not calibrated or no shooter was seen
+        recently.
+        """
+        if self._three_point_zone is None or not self._shooter_history:
+            return 2
+
+        # Find basket bbox for zone anchoring
+        basket_center: tuple[float, float] | None = None
+        basket_width: float = 0.0
+        for t in tracks:
+            if t.class_name == "Basket":
+                x1, y1, x2, y2 = t.bbox
+                basket_center = ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+                basket_width = float(x2 - x1)
+                break
+
+        if basket_center is None or basket_width == 0:
+            return 2
+
+        # Use the most recent shooter within the lookback window
+        _, foot_xy = self._shooter_history[-1]
+
+        return self._three_point_zone.classify(foot_xy, basket_center, basket_width)
+
     # ------------------------------------------------------------------
     # Accessors
     # ------------------------------------------------------------------
+
+    @property
+    def three_point_zone(self) -> "ThreePointZone | None":
+        return self._three_point_zone
 
     @property
     def total_makes(self) -> int:
@@ -148,6 +217,7 @@ class GameState:
         self.events.clear()
         self._cooldown_remaining = 0
         self._last_event = None
+        self._shooter_history.clear()
         self._session_start = time.time()
         logger.info("GameState reset.")
 
@@ -171,10 +241,24 @@ class GameState:
     @classmethod
     def from_config(cls, cfg: dict) -> "GameState":
         """Build from the config.yaml sources section."""
+        from src.three_point_zone import ThreePointZone
+
         source_team_map = {
             s["name"]: s.get("team", "A")
             for s in cfg.get("sources", [])
             if "name" in s
         }
-        cooldown = cfg.get("event_logic", {}).get("shot_cooldown_frames", 45)
-        return cls(shot_cooldown_frames=cooldown, source_team_map=source_team_map)
+        el = cfg.get("event_logic", {})
+        cooldown = el.get("shot_cooldown_frames", 45)
+        prefer_furthest = el.get("prefer_furthest_shooter", True)
+        basket_min_confidence = el.get("basket_min_confidence", 0.60)
+        basket_min_frames = el.get("basket_min_frames", 3)
+        zone = ThreePointZone.from_config(cfg)
+        return cls(
+            shot_cooldown_frames=cooldown,
+            source_team_map=source_team_map,
+            three_point_zone=zone,
+            prefer_furthest_shooter=prefer_furthest,
+            basket_min_confidence=basket_min_confidence,
+            basket_min_frames=basket_min_frames,
+        )

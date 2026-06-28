@@ -64,7 +64,7 @@ python src/highlight_maker.py store/output/<run>/game_log.json store/output/<run
 - [x] `tracker.py` — ByteTrack via `model.track(persist=True)` → typed `Track` objects
 - [x] `visualizer.py` — bounding boxes, track IDs, fading ball trail, score overlay, FPS panel
 - [x] `game_state.py` — score tracking, `Ball_in_Basket` detection, 45-frame shot debounce
-- [x] `pipeline_test.py` — full source → detect/track → score → visualize loop with `--save-output` / `--save-log`
+- [x] `detect_track_and_log.py` — full source → detect/track → score → visualize loop with `--save-output` / `--save-log`
 - [x] `train.py` — reads all training params from `config.yaml`; swap dataset in one line
 - [x] `config.yaml` — all thresholds, source types, paths, and training params; nothing hardcoded
 - [x] Docker setup with CUDA 12.4 support (GPU passthrough, camera mounts)
@@ -128,7 +128,7 @@ basketball-cv/
 │   ├── highlight_maker.py   # CLI: cut basket highlight clips from event log + raw video
 │   │
 │   ├── train.py             # fine-tune YOLOv11 from config.yaml (swap dataset in one line)
-│   ├── pipeline_test.py     # end-to-end test: source → detect/track → score → visualize
+│   ├── detect_track_and_log.py     # end-to-end test: source → detect/track → score → visualize
 │   ├── source_test.py       # verify a video source opens and delivers frames
 │   ├── camera_test.py       # scan USB camera indices
 │   └── detection_test.py    # CUDA check + YOLOv11 FPS benchmark
@@ -192,7 +192,7 @@ The app shows a raw preview and annotated output side by side, with live score m
 ### 5. Run on a pre-recorded file
 
 ```bash
-python src/pipeline_test.py --file store/footage/your_clip.mp4
+python src/detect_track_and_log.py --file store/footage/your_clip.mp4
 ```
 
 ### 6. Blur faces in recorded footage
@@ -212,19 +212,19 @@ python src/blur_footage.py store/output/game.mp4 --face-imgsz 1920 --face-conf 0
 
 ```bash
 # Detection only (no tracking) — good for calibrating confidence threshold
-python src/pipeline_test.py --file store/footage/clip.mp4 --detect-only
+python src/detect_track_and_log.py --file store/footage/clip.mp4 --detect-only
 
 # Slow playback to inspect frame by frame
-python src/pipeline_test.py --file store/footage/clip.mp4 --playback-speed 0.25
+python src/detect_track_and_log.py --file store/footage/clip.mp4 --playback-speed 0.25
 
 # Save annotated output clip
-python src/pipeline_test.py --file store/footage/clip.mp4 --save-output store/output/annotated.mp4
+python src/detect_track_and_log.py --file store/footage/clip.mp4 --save-output store/output/annotated.mp4
 
 # Headless (no window — Docker or SSH)
-python src/pipeline_test.py --file store/footage/clip.mp4 --no-preview
+python src/detect_track_and_log.py --file store/footage/clip.mp4 --no-preview
 
 # Live RTSP stream (buffered — no dropped frames)
-python src/pipeline_test.py --rtsp http://<phone-ip>:8080/video --stream-buffer --chunk-seconds 5
+python src/detect_track_and_log.py --rtsp http://<phone-ip>:8080/video --stream-buffer --chunk-seconds 5
 ```
 
 ### 8. Docker

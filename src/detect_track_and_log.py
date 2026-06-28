@@ -1,34 +1,33 @@
 """
-pipeline_test.py — end-to-end pipeline test: source → detect/track → visualize.
+detect_track_and_log.py — run detection and tracking on footage, producing an
+annotated output video and a JSON event log for the highlight maker.
 
 Runs the full processing chain on any configured source (file, RTSP, or USB)
-and displays the annotated output. Use this to verify detection quality and
-tracking stability before building event logic on top.
-
-This script is also the right place to record annotated output clips for
-reviewing detection/tracking quality offline.
+and displays the annotated output. Use this to verify detection quality,
+review tracking stability, and generate event logs for downstream tools
+(highlight_maker.py, stat aggregation).
 
 Usage:
-    # Test all sources from config.yaml (one window per source, sequential)
-    python src/pipeline_test.py
+    # Run all sources from config.yaml (one window per source, sequential)
+    python src/detect_track_and_log.py
 
-    # Test a single source by name
-    python src/pipeline_test.py --source basket_1
+    # Run a single source by name
+    python src/detect_track_and_log.py --source basket_1
 
-    # Test with a one-off file (no config entry needed)
-    python src/pipeline_test.py --file test_footage/basket_1.mp4
+    # Run with a one-off file (no config entry needed)
+    python src/detect_track_and_log.py --file test_footage/basket_1.mp4
 
     # Detection only (no tracking — faster, useful for initial calibration)
-    python src/pipeline_test.py --detect-only
+    python src/detect_track_and_log.py --detect-only
 
     # Save annotated output to a file
-    python src/pipeline_test.py --file test_footage/basket_1.mp4 --save-output output/basket_1_annotated.mp4
+    python src/detect_track_and_log.py --file test_footage/basket_1.mp4 --save-output output/basket_1_annotated.mp4
 
     # Headless (no window — useful inside Docker, still prints FPS)
-    python src/pipeline_test.py --no-preview
+    python src/detect_track_and_log.py --no-preview
 
     # Slow down playback to inspect individual detections
-    python src/pipeline_test.py --file test_footage/basket_1.mp4 --playback-speed 0.25
+    python src/detect_track_and_log.py --file test_footage/basket_1.mp4 --playback-speed 0.25
 """
 
 from __future__ import annotations
@@ -38,6 +37,7 @@ import glob as _glob
 import json
 import logging
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -209,7 +209,7 @@ def run_pipeline(
         logger.error("[%s] Failed to open source.", source.name)
         return {"ok": False}
 
-    viz = Visualizer()
+    viz = Visualizer(three_point_zone=game_state.three_point_zone if game_state else None)
     writer: cv2.VideoWriter | None = None
     raw_writer: cv2.VideoWriter | None = None
     frame_log: list[dict] = []
@@ -410,6 +410,48 @@ def run_pipeline(
 
 
 # ---------------------------------------------------------------------------
+# Benchmark logging
+# ---------------------------------------------------------------------------
+
+BENCHMARK_LOG = Path("store/benchmarks.jsonl")
+
+
+def _log_benchmark(result: dict, source_name: str, video_path: str | None, cfg: dict) -> None:
+    """Append one JSONL record to store/benchmarks.jsonl after a completed run."""
+    try:
+        import torch
+        device = cfg.get("model", {}).get("device", 0)
+        if torch.cuda.is_available() and isinstance(device, int):
+            gpu_name = torch.cuda.get_device_name(device)
+            gpu_vram_gb = round(torch.cuda.get_device_properties(device).total_memory / 1e9, 1)
+        else:
+            gpu_name = "cpu"
+            gpu_vram_gb = 0.0
+    except Exception:
+        gpu_name = "unknown"
+        gpu_vram_gb = 0.0
+
+    record = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "hostname": socket.gethostname(),
+        "gpu": gpu_name,
+        "gpu_vram_gb": gpu_vram_gb,
+        "source": source_name,
+        "video": Path(video_path).name if video_path else None,
+        "avg_fps": round(result["avg_fps"], 2),
+        "total_frames": result["frames"],
+        "duration_s": round(result["duration_s"], 1),
+        "imgsz": cfg.get("model", {}).get("input_size"),
+        "weights": Path(cfg.get("model", {}).get("weights", "")).name or None,
+    }
+
+    BENCHMARK_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with open(BENCHMARK_LOG, "a") as f:
+        f.write(json.dumps(record) + "\n")
+    logger.info("Benchmark logged → %s  (%.1f avg FPS on %s)", BENCHMARK_LOG, result["avg_fps"], gpu_name)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -447,6 +489,12 @@ def main() -> None:
                              "Required input for highlight_maker.py. In stream-buffer mode the "
                              "raw chunks are concatenated; in file mode a parallel writer is used.")
 
+    parser.add_argument(
+        "--device", metavar="DEVICE", default=None,
+        help="Override config.yaml model.device (e.g. 'cpu', '0', '1'). "
+             "Use 'cpu' on machines without a CUDA GPU.",
+    )
+
     # One-off source overrides
     grp = parser.add_argument_group("one-off source overrides")
     grp.add_argument("--file", metavar="PATH", help="Test a video file directly")
@@ -479,6 +527,10 @@ def main() -> None:
         logger.info("Auto save output: %s", args.save_output)
 
     model_cfg = cfg["model"]
+    if args.device is not None:
+        device_val = int(args.device) if args.device.isdigit() else args.device
+        model_cfg = {**model_cfg, "device": device_val}
+        logger.info("Device override: %s", device_val)
     tracking_cfg = cfg.get("tracking", {})
 
     # ── Load model ────────────────────────────────────────────────────────
@@ -700,7 +752,7 @@ def main() -> None:
             else:
                 log_path = None
 
-            run_pipeline(
+            result = run_pipeline(
                 source=source,
                 detector=detector,
                 tracker=tracker,
@@ -714,6 +766,9 @@ def main() -> None:
                 detect_only=detect_only,
                 inference_every=args.inference_every,
             )
+
+            if result.get("ok") and result.get("frames", 0) > 0:
+                _log_benchmark(result, source.name, args.file, cfg)
 
             # Reset tracker state between sources so IDs don't bleed across
             if tracker is not None:

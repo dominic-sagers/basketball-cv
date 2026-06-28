@@ -1,7 +1,7 @@
 """
 highlight_maker.py — cut highlight clips from a clean game recording.
 
-Reads the event log JSON produced by pipeline_test.py --save-log and
+Reads the event log JSON produced by detect_track_and_log.py --save-log and
 cuts a clip around each scored basket from the raw (unannotated) video
 produced by --save-raw.  Clips are trimmed with ffmpeg (stream copy —
 no re-encode) and saved as individual mp4 files.
