@@ -138,6 +138,13 @@ event_logic:
   shot_downward_frames: 3      # frames ball must travel downward through hoop zone
   assist_possession_window: 5  # seconds — look-back window for last pass
   block_hand_ball_dist_px: 40  # max hand-to-ball distance to count as a block
+  prefer_furthest_shooter: true # when ball carrier unavailable, pick the Player_Shooting
+                                # history entry furthest from the basket (reduces defender
+                                # misclassification until model training improves)
+  basket_min_confidence: 0.60  # Ball_in_Basket detections below this are ignored
+  basket_min_frames: 3         # Ball_in_Basket must appear in N consecutive processed
+                               # frames before a score is counted (filters single-frame
+                               # noise; at ~7 FPS a real make is visible for 5-10+ frames)
 
 # ---------------------------------------------------------------------------
 # Highlight maker (src/highlight_maker.py)

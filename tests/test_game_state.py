@@ -18,6 +18,7 @@ class FakeTrack:
     """Stands in for a Tracker Track."""
     class_name: str
     bbox: tuple[int, int, int, int] = field(default_factory=lambda: (0, 0, 10, 10))
+    confidence: float = 1.0
 
 
 BALL = [FakeTrack("Ball_in_Basket")]
@@ -25,7 +26,7 @@ NO_BALL = [FakeTrack("Player"), FakeTrack("Basketball")]
 
 
 def test_made_basket_scores_two_for_team_a():
-    gs = GameState(shot_cooldown_frames=0)
+    gs = GameState(shot_cooldown_frames=0, basket_min_frames=1)
     fired = gs.process_frame(BALL, frame_number=0)
     assert len(fired) == 1
     assert fired[0].event_type == "score"
@@ -34,14 +35,14 @@ def test_made_basket_scores_two_for_team_a():
 
 
 def test_no_make_no_event():
-    gs = GameState(shot_cooldown_frames=0)
+    gs = GameState(shot_cooldown_frames=0, basket_min_frames=1)
     assert gs.process_frame(NO_BALL, frame_number=0) == []
     assert gs.score == {"A": 0, "B": 0}
 
 
 def test_cooldown_debounces_duplicate_makes():
     # Ball_in_Basket persists across consecutive frames; one make must count once.
-    gs = GameState(shot_cooldown_frames=3)
+    gs = GameState(shot_cooldown_frames=3, basket_min_frames=1)
     fired = []
     for f in range(4):  # frame 0 scores, 1-2 suppressed, frame 3 scores again
         fired += gs.process_frame(BALL, frame_number=f)
@@ -51,21 +52,21 @@ def test_cooldown_debounces_duplicate_makes():
 
 
 def test_cooldown_active_flag():
-    gs = GameState(shot_cooldown_frames=5)
+    gs = GameState(shot_cooldown_frames=5, basket_min_frames=1)
     assert gs.cooldown_active is False
     gs.process_frame(BALL, frame_number=0)
     assert gs.cooldown_active is True
 
 
 def test_team_mapping_credits_correct_team():
-    gs = GameState(shot_cooldown_frames=0, source_team_map={"basket_2": "B"})
+    gs = GameState(shot_cooldown_frames=0, source_team_map={"basket_2": "B"}, basket_min_frames=1)
     fired = gs.process_frame(BALL, frame_number=0, source_name="basket_2")
     assert fired[0].team == "B"
     assert gs.score == {"A": 0, "B": 2}
 
 
 def test_unknown_source_defaults_to_team_a():
-    gs = GameState(shot_cooldown_frames=0, source_team_map={"basket_2": "B"})
+    gs = GameState(shot_cooldown_frames=0, source_team_map={"basket_2": "B"}, basket_min_frames=1)
     fired = gs.process_frame(BALL, frame_number=0, source_name="mystery_cam")
     assert fired[0].team == "A"
 
@@ -89,7 +90,7 @@ def test_from_config_defaults_cooldown_when_absent():
 
 
 def test_to_dict_shape():
-    gs = GameState(shot_cooldown_frames=0)
+    gs = GameState(shot_cooldown_frames=0, basket_min_frames=1)
     gs.process_frame(BALL, frame_number=5)
     d = gs.to_dict()
     assert d["score"]["A"] == 2
@@ -103,7 +104,7 @@ def test_to_dict_shape():
 
 
 def test_reset_clears_state():
-    gs = GameState(shot_cooldown_frames=0)
+    gs = GameState(shot_cooldown_frames=0, basket_min_frames=1)
     gs.process_frame(BALL, frame_number=0)
     gs.reset()
     assert gs.score == {"A": 0, "B": 0}
@@ -138,20 +139,20 @@ def _shooter_track(foot_x: int, foot_y: int) -> FakeTrack:
 
 
 def test_no_zone_always_scores_two():
-    gs = GameState(shot_cooldown_frames=0, three_point_zone=None)
+    gs = GameState(shot_cooldown_frames=0, three_point_zone=None, basket_min_frames=1)
     fired = gs.process_frame(BALL, frame_number=0)
     assert fired[0].points == 2
 
 
 def test_zone_present_no_shooter_history_scores_two():
-    gs = GameState(shot_cooldown_frames=0, three_point_zone=_simple_zone())
+    gs = GameState(shot_cooldown_frames=0, three_point_zone=_simple_zone(), basket_min_frames=1)
     tracks = [FakeTrack("Ball_in_Basket"), _basket_track()]
     fired = gs.process_frame(tracks, frame_number=0)
     assert fired[0].points == 2
 
 
 def test_zone_present_no_basket_in_frame_scores_two():
-    gs = GameState(shot_cooldown_frames=0, three_point_zone=_simple_zone())
+    gs = GameState(shot_cooldown_frames=0, three_point_zone=_simple_zone(), basket_min_frames=1)
     # Frame 0: shooter recorded but no basket
     gs.process_frame([_shooter_track(100, 150)], frame_number=0)
     # Frame 1: ball in basket but still no basket bbox
@@ -162,7 +163,7 @@ def test_zone_present_no_basket_in_frame_scores_two():
 def test_shooter_inside_arc_scores_two():
     # Basket at (100, 100), width 20 → arc radius = 40px
     # Shooter foot at (100, 120) = 20px below basket → inside arc
-    gs = GameState(shot_cooldown_frames=0, three_point_zone=_simple_zone(radius=2.0))
+    gs = GameState(shot_cooldown_frames=0, three_point_zone=_simple_zone(radius=2.0), basket_min_frames=1)
     basket = _basket_track(cx=100, cy=100, w=20)
     shooter = _shooter_track(foot_x=100, foot_y=120)   # 20px from basket < 40px arc
 
@@ -174,7 +175,7 @@ def test_shooter_inside_arc_scores_two():
 
 def test_shooter_outside_arc_scores_three():
     # Shooter foot at (100, 165) = 65px below basket → outside 40px arc
-    gs = GameState(shot_cooldown_frames=0, three_point_zone=_simple_zone(radius=2.0))
+    gs = GameState(shot_cooldown_frames=0, three_point_zone=_simple_zone(radius=2.0), basket_min_frames=1)
     basket = _basket_track(cx=100, cy=100, w=20)
     shooter = _shooter_track(foot_x=100, foot_y=165)   # 65px from basket > 40px arc
 
@@ -185,7 +186,7 @@ def test_shooter_outside_arc_scores_three():
 
 
 def test_three_point_score_accumulates_correctly():
-    gs = GameState(shot_cooldown_frames=0, three_point_zone=_simple_zone(radius=2.0))
+    gs = GameState(shot_cooldown_frames=0, three_point_zone=_simple_zone(radius=2.0), basket_min_frames=1)
     basket = _basket_track(cx=100, cy=100, w=20)
     shooter = _shooter_track(foot_x=100, foot_y=165)
 
@@ -199,7 +200,7 @@ def test_three_point_score_accumulates_correctly():
 
 def test_shooter_history_uses_most_recent_position():
     """Earlier inside-arc position is overwritten by later outside-arc position."""
-    gs = GameState(shot_cooldown_frames=0, three_point_zone=_simple_zone(radius=2.0))
+    gs = GameState(shot_cooldown_frames=0, three_point_zone=_simple_zone(radius=2.0), basket_min_frames=1)
     basket = _basket_track(cx=100, cy=100, w=20)
 
     gs.process_frame([_shooter_track(100, 120), basket], frame_number=0)  # inside
@@ -210,5 +211,57 @@ def test_shooter_history_uses_most_recent_position():
 
 def test_three_point_zone_property_exposed():
     zone = _simple_zone()
-    gs = GameState(three_point_zone=zone)
+    gs = GameState(three_point_zone=zone, basket_min_frames=1)
     assert gs.three_point_zone is zone
+
+
+# ---------------------------------------------------------------------------
+# basket_min_frames streak filter + basket_min_confidence
+# ---------------------------------------------------------------------------
+
+def test_basket_min_frames_filters_single_frame_noise():
+    """A single Ball_in_Basket frame must not score when basket_min_frames=3."""
+    gs = GameState(shot_cooldown_frames=0, basket_min_frames=3)
+    fired = gs.process_frame(BALL, frame_number=0)
+    assert fired == []
+    assert gs.score == {"A": 0, "B": 0}
+
+
+def test_basket_min_frames_scores_after_streak():
+    """Score fires on the Nth consecutive Ball_in_Basket frame."""
+    gs = GameState(shot_cooldown_frames=0, basket_min_frames=3)
+    results = []
+    for f in range(3):
+        results += gs.process_frame(BALL, frame_number=f)
+    assert len(results) == 1
+    assert results[0].points == 2
+
+
+def test_basket_min_frames_streak_resets_on_gap():
+    """A gap in detections resets the streak — must see N consecutive again."""
+    gs = GameState(shot_cooldown_frames=0, basket_min_frames=3)
+    for f in range(2):
+        gs.process_frame(BALL, frame_number=f)
+    gs.process_frame(NO_BALL, frame_number=2)
+    results = []
+    for f in range(3, 6):
+        results += gs.process_frame(BALL, frame_number=f)
+    assert len(results) == 1
+
+
+def test_basket_min_confidence_filters_low_conf():
+    """Ball_in_Basket below basket_min_confidence must not score."""
+    low_conf = [FakeTrack("Ball_in_Basket", confidence=0.4)]
+    gs = GameState(shot_cooldown_frames=0, basket_min_confidence=0.60, basket_min_frames=1)
+    fired = gs.process_frame(low_conf, frame_number=0)
+    assert fired == []
+    assert gs.score == {"A": 0, "B": 0}
+
+
+def test_basket_min_confidence_allows_high_conf():
+    """Ball_in_Basket at or above basket_min_confidence scores normally."""
+    high_conf = [FakeTrack("Ball_in_Basket", confidence=0.75)]
+    gs = GameState(shot_cooldown_frames=0, basket_min_confidence=0.60, basket_min_frames=1)
+    fired = gs.process_frame(high_conf, frame_number=0)
+    assert len(fired) == 1
+    assert fired[0].points == 2

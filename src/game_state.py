@@ -65,12 +65,19 @@ class GameState:
         shot_cooldown_frames: int = 45,
         source_team_map: dict[str, str] | None = None,
         three_point_zone: "ThreePointZone | None" = None,
+        prefer_furthest_shooter: bool = True,
+        basket_min_confidence: float = 0.60,
+        basket_min_frames: int = 3,
     ) -> None:
         self.score: dict[str, int] = {"A": 0, "B": 0}
         self.events: list[GameEvent] = []
         self._shot_cooldown_frames = shot_cooldown_frames
         self._source_team_map = source_team_map or {}
         self._three_point_zone = three_point_zone
+        self._prefer_furthest_shooter = prefer_furthest_shooter
+        self._basket_min_confidence = basket_min_confidence
+        self._basket_min_frames = basket_min_frames
+        self._basket_streak: int = 0
         self._cooldown_remaining: int = 0
         self._session_start = time.time()
         self._last_event: GameEvent | None = None
@@ -116,7 +123,17 @@ class GameState:
                 foot_xy = ((x1 + x2) / 2.0, float(y2))  # bottom-centre = approx floor
                 self._shooter_history.append((frame_number, foot_xy))
 
-        ball_in_basket = any(t.class_name in MADE_BASKET_CLASSES for t in tracks)
+        confident_basket = any(
+            t.class_name in MADE_BASKET_CLASSES and t.confidence >= self._basket_min_confidence
+            for t in tracks
+        )
+
+        if confident_basket:
+            self._basket_streak += 1
+        else:
+            self._basket_streak = 0
+
+        ball_in_basket = confident_basket and self._basket_streak >= self._basket_min_frames
 
         if ball_in_basket and self._cooldown_remaining == 0:
             points = self._classify_shot(tracks, frame_number)
@@ -231,10 +248,17 @@ class GameState:
             for s in cfg.get("sources", [])
             if "name" in s
         }
-        cooldown = cfg.get("event_logic", {}).get("shot_cooldown_frames", 45)
+        el = cfg.get("event_logic", {})
+        cooldown = el.get("shot_cooldown_frames", 45)
+        prefer_furthest = el.get("prefer_furthest_shooter", True)
+        basket_min_confidence = el.get("basket_min_confidence", 0.60)
+        basket_min_frames = el.get("basket_min_frames", 3)
         zone = ThreePointZone.from_config(cfg)
         return cls(
             shot_cooldown_frames=cooldown,
             source_team_map=source_team_map,
             three_point_zone=zone,
+            prefer_furthest_shooter=prefer_furthest,
+            basket_min_confidence=basket_min_confidence,
+            basket_min_frames=basket_min_frames,
         )
