@@ -98,7 +98,7 @@ def _archive_session(
         logger.warning("[Cam %s] No chunks recorded — nothing to archive.", camera_team)
         return
 
-    out_dir = Path("store/output") / run_id
+    out_dir = Path("store/output/games") / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
     raw_out = str(out_dir / f"game_cam{camera_team.upper()}_raw.mp4")
 
@@ -211,7 +211,7 @@ def main() -> None:
     parser.add_argument("--camera-team", metavar="A|B", default="A",
                         help="Which team's basket this camera covers (default: A)")
     parser.add_argument("--chunk-seconds", type=float, default=5.0, metavar="SECS")
-    parser.add_argument("--chunk-dir", metavar="DIR", default="store/output/stream-chunks")
+    parser.add_argument("--chunk-dir", metavar="DIR", default="store/output/dev/stream-chunks")
     parser.add_argument("--run-id", metavar="ID", default=None,
                         help="Session ID (default: current timestamp). Use the same ID across "
                              "both cameras so their footage is grouped in the same run directory.")
