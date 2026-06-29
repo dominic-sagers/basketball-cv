@@ -6,7 +6,7 @@ Can also be used manually:
 
     python src/game_archive.py --list           # show archived sessions
     python src/game_archive.py --push           # push latest store state to DVC remote
-    python src/game_archive.py --replay <file>  # print the pipeline_test replay command
+    python src/game_archive.py --replay <file>  # print the detect_track_and_log replay command
 
 After a session, commit the DVC pointer to git:
     git add store.dvc && git commit -m "archive: game <run_id>" && git push
@@ -139,7 +139,7 @@ def main() -> None:
         p = Path(args.replay)
         run_id = p.parent.name
         print(
-            f"python src/pipeline_test.py --file {p} "
+            f"python src/detect_track_and_log.py --file {p} "
             f"--save-log store/output/{run_id}/{p.stem}_replay_log.json"
         )
         return

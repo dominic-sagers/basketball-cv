@@ -298,10 +298,25 @@ class PipelineWorker(QThread):
             if not _concat_chunks(raw_chunks, raw_out):
                 raw_out = None
 
-        # 2a. Push to DVC remote so the clip viewer picks up this session
+        # 2a. Push to DVC remote so the clip viewer picks up this session.
+        # Non-daemon so the process stays alive until the push completes or
+        # fails — a daemon thread would be silently killed on app exit.
         if raw_out and self._run_id:
             from src.game_archive import dvc_push
-            threading.Thread(target=dvc_push, daemon=True).start()
+            import logging as _logging
+            _log = _logging.getLogger(__name__)
+
+            def _push_and_log() -> None:
+                ok = dvc_push()
+                if not ok:
+                    _log.error(
+                        "DVC push failed after session — raw footage is still in "
+                        "store/output/%s. Run `python src/game_archive.py --push` "
+                        "manually to retry, or `dvc push` directly.",
+                        self._run_id,
+                    )
+
+            threading.Thread(target=_push_and_log, daemon=False).start()
 
         # 3. Delete raw source chunks (both annotated and raw concat are done)
         # RTSP chunks live in cam_chunk_dir; http_chunks live in store/chunks/validated/
