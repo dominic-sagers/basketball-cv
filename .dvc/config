@@ -2,3 +2,5 @@
     remote = origin
 ['remote "origin"']
     url = ssh://dvc@100.73.67.6/mnt/drive2/basketball-cv-data
+['remote "nuc"']
+    url = ssh://bb@100.87.111.53/home/bb/dvc-store
