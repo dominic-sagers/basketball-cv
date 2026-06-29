@@ -1,0 +1,8 @@
+# basketball-cv archive server — no GPU, no CV inference
+# Install: pip install -r requirements-server.txt
+
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0    # [standard] pulls httptools + uvloop
+python-multipart>=0.0.12     # multipart/form-data for chunk uploads
+pyyaml>=6.0
+dvc[ssh]>=3.0                # DVC push to SSH remote after each session

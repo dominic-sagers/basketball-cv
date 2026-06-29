@@ -45,8 +45,11 @@ Dockerfile
 docker-compose.yml
 .dockerignore
 
-# Documentation (already in image if needed)
+# Documentation and tests
 docs/
+tests/
+.dvc/
+*.dvc
 
 # Video files
 *.mp4
