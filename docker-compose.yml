@@ -8,6 +8,9 @@ services:
       - "8000:8000"
     volumes:
       - ./store:/app/store          # persists chunks, session state, and game output
+      - ./.dvc:/app/.dvc            # DVC project metadata + cache (not baked into image, see .dockerignore)
+      - ./store.dvc:/app/store.dvc  # DVC pointer file for store/, updated in place by `dvc add`
+      - ./.git:/app/.git            # DVC needs the linked git repo present to update .gitignore
       - ${HOME}/.ssh:/root/.ssh:ro  # SSH keys for DVC push to remote
     environment:
       - PYTHONUNBUFFERED=1
