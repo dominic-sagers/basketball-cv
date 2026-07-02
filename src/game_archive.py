@@ -18,33 +18,48 @@ import logging
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 OUTPUT_DIR = Path("store/output")
 
+# Tracks the one background `dvc push` that may be running, so a local `dvc add`
+# (which must win immediately — see dvc_add_local) can terminate it rather than
+# block behind it. DVC's own lock file makes `add` and `push` mutually exclusive;
+# confirmed 2026-07-02 when a running push made a concurrent add fail outright
+# with "Unable to acquire lock" instead of queueing.
+_push_lock = threading.Lock()
+_push_proc: subprocess.Popen | None = None
+
 
 # ---------------------------------------------------------------------------
-# DVC push
+# DVC add (local, fast — gates archive completion)
 # ---------------------------------------------------------------------------
 
-def dvc_push(project_root: str = ".") -> bool:
+def dvc_add_local(project_root: str = ".") -> bool:
     """
-    Re-hash store/ and push newly archived files to the DVC remote.
+    Re-hash store/ into the local DVC cache on this machine (bb-1).
 
-    Runs `dvc add store` (picks up any new files), then `dvc push`.
-    Logs the git command needed to commit the updated store.dvc pointer.
+    This is the part that must complete for a session to count as archived —
+    it's disk-bound, not network-bound, so it should take seconds regardless
+    of remote push speed. If a background dvc_push_background() is currently
+    holding DVC's lock, it gets killed so this can proceed immediately; the
+    push resumes (incrementally, nothing already sent is re-sent) on the next
+    dvc_push_background() call.
 
     Returns True on success.
     """
     dvc = _find_dvc(project_root)
     if not dvc:
         logger.warning(
-            "dvc not found — skipping push. "
+            "dvc not found — skipping add. "
             "Activate .venv or install dvc (pip install dvc[ssh])."
         )
         return False
+
+    _kill_in_flight_push()
 
     try:
         logger.info("Updating store.dvc (dvc add store) …")
@@ -57,17 +72,7 @@ def dvc_push(project_root: str = ".") -> bool:
             logger.error("dvc add store failed:\n%s", (r.stderr or r.stdout)[-600:])
             return False
 
-        logger.info("Pushing to DVC remote …")
-        r = subprocess.run(
-            [dvc, "push"],
-            capture_output=True, text=True, cwd=project_root,
-            timeout=1800,
-        )
-        if r.returncode != 0:
-            logger.error("dvc push failed:\n%s", (r.stderr or r.stdout)[-600:])
-            return False
-
-        logger.info("DVC push complete.")
+        logger.info("dvc add complete — data is safe in the local cache on this machine.")
         logger.info(
             "Commit the updated pointer:  "
             "git add store.dvc && git commit -m 'archive: game session' && git push"
@@ -75,11 +80,69 @@ def dvc_push(project_root: str = ".") -> bool:
         return True
 
     except subprocess.TimeoutExpired as exc:
-        logger.error("DVC command timed out after %ss: %s", exc.timeout, exc.cmd)
+        logger.error("dvc add timed out after %ss: %s", exc.timeout, exc.cmd)
         return False
     except Exception as exc:
-        logger.error("DVC push error: %s", exc)
+        logger.error("dvc add error: %s", exc)
         return False
+
+
+# ---------------------------------------------------------------------------
+# DVC push (remote, slow — best-effort, does not gate anything)
+# ---------------------------------------------------------------------------
+
+def dvc_push_background(project_root: str = ".") -> None:
+    """
+    Push the local DVC cache to the remote (Dominic's tailnet machine) in the
+    background. Not timed — over the current relay-bound link this can take
+    hours for a full game; that's fine, since nothing waits on it. Call this
+    from a daemon thread after dvc_add_local() succeeds.
+
+    If dvc_add_local() kills this mid-push, the next call resumes: DVC only
+    sends objects the remote doesn't already have.
+    """
+    dvc = _find_dvc(project_root)
+    if not dvc:
+        return
+
+    global _push_proc
+    with _push_lock:
+        if _push_proc is not None and _push_proc.poll() is None:
+            logger.info("dvc push already in progress — this session's data will ride along.")
+            return
+        logger.info("Starting background dvc push to remote …")
+        _push_proc = subprocess.Popen(
+            [dvc, "push"], cwd=project_root,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        proc = _push_proc
+
+    out, _ = proc.communicate()
+    with _push_lock:
+        if _push_proc is proc:
+            _push_proc = None
+
+    if proc.returncode == 0:
+        logger.info("Background dvc push complete.")
+    elif proc.returncode < 0:
+        logger.info("Background dvc push interrupted (signal %d) — will resume next time.", -proc.returncode)
+    else:
+        logger.error("Background dvc push failed:\n%s", (out or "")[-600:])
+
+
+def _kill_in_flight_push() -> None:
+    """Terminate the background push if one is running, so a local add can proceed now."""
+    global _push_proc
+    with _push_lock:
+        proc = _push_proc
+        _push_proc = None
+    if proc is not None and proc.poll() is None:
+        logger.info("A background dvc push is running — stopping it so dvc add can proceed now.")
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +200,9 @@ def main() -> None:
         return
 
     if args.push:
-        ok = dvc_push()
+        ok = dvc_add_local()
+        if ok:
+            dvc_push_background()
         sys.exit(0 if ok else 1)
 
     if args.replay:

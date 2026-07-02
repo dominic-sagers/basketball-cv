@@ -47,7 +47,7 @@ from fastapi.responses import JSONResponse
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.game_archive import dvc_push
+from src.game_archive import dvc_add_local, dvc_push_background
 
 logger = logging.getLogger(__name__)
 
@@ -312,14 +312,24 @@ def _crc32_hex(path: Path) -> str:
     return f"{crc & 0xFFFFFFFF:08x}"
 
 
-# DVC is not safe for concurrent CLI invocations against one repo — two sessions
+# dvc add is not safe for concurrent CLI invocations against one repo — two sessions
 # ending close together previously collided on DVC's internal lock, and the failed
-# one still got reported as archived DONE. Serialize all dvc_push() calls here.
+# one still got reported as archived DONE. Serialize dvc_add_local() calls here.
+# The background dvc_push_background() has its own single-flight guard and does
+# not need this lock — see game_archive.py.
 _dvc_lock = threading.Lock()
 
 
 def _run_archive(session: GameSession, cfg: ServerConfig, registry: SessionRegistry) -> None:
-    """Background thread: concat each camera's chunks → raw MP4 → dvc push → DONE."""
+    """
+    Background thread: concat each camera's chunks → raw MP4 → dvc add (local) → DONE.
+
+    A session counts as archived once its data is safely in the local DVC cache
+    on this machine — that's disk-bound and fast. Pushing that cache on to the
+    remote (Dominic's tailnet machine) happens separately in its own background
+    thread and does not gate this session's completion; over the current
+    relay-bound link a full push can take hours, and nothing should wait on it.
+    """
     out_dir = cfg.games_root / session.run_id
     out_dir.mkdir(parents=True, exist_ok=True)
     all_ok = True
@@ -340,14 +350,21 @@ def _run_archive(session: GameSession, cfg: ServerConfig, registry: SessionRegis
         return
 
     with _dvc_lock:
-        pushed = dvc_push()
+        added = dvc_add_local()
 
-    if pushed:
-        registry.set_state(session.run_id, DONE)
-        logger.info("Session %s archived → DONE", session.run_id)
-    else:
-        registry.set_state(session.run_id, FAILED, error="DVC push failed or timed out — see server logs")
-        logger.error("Session %s archive failed → FAILED (dvc push)", session.run_id)
+    if not added:
+        registry.set_state(session.run_id, FAILED, error="dvc add failed — see server logs")
+        logger.error("Session %s archive failed → FAILED (dvc add)", session.run_id)
+        return
+
+    registry.set_state(session.run_id, DONE)
+    logger.info("Session %s archived → DONE (local)", session.run_id)
+
+    threading.Thread(
+        target=dvc_push_background,
+        name=f"dvc-push-{session.run_id}",
+        daemon=True,
+    ).start()
 
 
 # ---------------------------------------------------------------------------

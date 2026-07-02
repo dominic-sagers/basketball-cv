@@ -252,7 +252,9 @@ class TestChunkUpload:
 class TestStateGuards:
     def _ended_session(self, client) -> str:
         run_id = client.post("/api/v1/sessions", json={"camera_id": "cam_a", "team": "A"}).json()["run_id"]
-        with patch("src.server.dvc_push", return_value=True), patch("src.server.threading.Thread", _SyncThread):
+        with patch("src.server.dvc_add_local", return_value=True), \
+             patch("src.server.dvc_push_background"), \
+             patch("src.server.threading.Thread", _SyncThread):
             client.post(f"/api/v1/sessions/{run_id}/end")
         return run_id
 
@@ -301,7 +303,8 @@ class TestTwoCameraE2E:
                 assert resp.status_code == 202, resp.text
 
         # End session — runs archive synchronously via _SyncThread
-        with patch("src.server.dvc_push", return_value=True), \
+        with patch("src.server.dvc_add_local", return_value=True), \
+             patch("src.server.dvc_push_background"), \
              patch("src.server.threading.Thread", _SyncThread):
             resp = client.post(f"/api/v1/sessions/{run_id}/end")
         assert resp.status_code == 202
@@ -320,7 +323,8 @@ class TestTwoCameraE2E:
         video = make_mp4(n_frames=5, name="chunk.mp4").read_bytes()
         _upload_chunk(client, run_id, "cam_a", "cam_a_chunk_0000", video)
 
-        with patch("src.server.dvc_push", return_value=True), \
+        with patch("src.server.dvc_add_local", return_value=True), \
+             patch("src.server.dvc_push_background"), \
              patch("src.server.threading.Thread", _SyncThread):
             client.post(f"/api/v1/sessions/{run_id}/end")
 
