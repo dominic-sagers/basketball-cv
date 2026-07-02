@@ -33,6 +33,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import zlib
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -465,6 +466,7 @@ def create_app(cfg: ServerConfig) -> FastAPI:
             "run_id": run_id,
             "camera_id": camera_id,
             "bytes": bytes_written,
+            "timestamp_received_ms": int(time.time() * 1000),
         }
 
     # --- Health --------------------------------------------------------------
