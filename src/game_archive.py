@@ -51,6 +51,7 @@ def dvc_push(project_root: str = ".") -> bool:
         r = subprocess.run(
             [dvc, "add", "store"],
             capture_output=True, text=True, cwd=project_root,
+            timeout=300,
         )
         if r.returncode != 0:
             logger.error("dvc add store failed:\n%s", (r.stderr or r.stdout)[-600:])
@@ -60,6 +61,7 @@ def dvc_push(project_root: str = ".") -> bool:
         r = subprocess.run(
             [dvc, "push"],
             capture_output=True, text=True, cwd=project_root,
+            timeout=1800,
         )
         if r.returncode != 0:
             logger.error("dvc push failed:\n%s", (r.stderr or r.stdout)[-600:])
@@ -72,6 +74,9 @@ def dvc_push(project_root: str = ".") -> bool:
         )
         return True
 
+    except subprocess.TimeoutExpired as exc:
+        logger.error("DVC command timed out after %ss: %s", exc.timeout, exc.cmd)
+        return False
     except Exception as exc:
         logger.error("DVC push error: %s", exc)
         return False

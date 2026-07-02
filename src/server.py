@@ -312,6 +312,12 @@ def _crc32_hex(path: Path) -> str:
     return f"{crc & 0xFFFFFFFF:08x}"
 
 
+# DVC is not safe for concurrent CLI invocations against one repo — two sessions
+# ending close together previously collided on DVC's internal lock, and the failed
+# one still got reported as archived DONE. Serialize all dvc_push() calls here.
+_dvc_lock = threading.Lock()
+
+
 def _run_archive(session: GameSession, cfg: ServerConfig, registry: SessionRegistry) -> None:
     """Background thread: concat each camera's chunks → raw MP4 → dvc push → DONE."""
     out_dir = cfg.games_root / session.run_id
@@ -328,13 +334,20 @@ def _run_archive(session: GameSession, cfg: ServerConfig, registry: SessionRegis
             logger.error("[%s] Camera %s concat failed", session.run_id, camera_id)
             all_ok = False
 
-    if all_ok:
-        dvc_push()
+    if not all_ok:
+        registry.set_state(session.run_id, FAILED, error="Concat failed for one or more cameras")
+        logger.error("Session %s archive failed → FAILED", session.run_id)
+        return
+
+    with _dvc_lock:
+        pushed = dvc_push()
+
+    if pushed:
         registry.set_state(session.run_id, DONE)
         logger.info("Session %s archived → DONE", session.run_id)
     else:
-        registry.set_state(session.run_id, FAILED, error="Concat failed for one or more cameras")
-        logger.error("Session %s archive failed → FAILED", session.run_id)
+        registry.set_state(session.run_id, FAILED, error="DVC push failed or timed out — see server logs")
+        logger.error("Session %s archive failed → FAILED (dvc push)", session.run_id)
 
 
 # ---------------------------------------------------------------------------
