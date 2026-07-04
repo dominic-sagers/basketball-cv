@@ -50,9 +50,9 @@ sources:
 # When a source of type "http_chunks" is present, `python src/app.py` runs the
 # embedded receiver and feeds validated chunks straight into the pipeline.
 # Receiver bind/storage settings live in the `receiver:` block further down.
-#   - name: "phone_1"
-#     type: "http_chunks"
-#     team: "A"
+  - name: "phone_1"
+    type: "http_chunks"
+    team: "A"
 
 # ---------------------------------------------------------------------------
 # Detection model

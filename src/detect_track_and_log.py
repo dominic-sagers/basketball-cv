@@ -81,8 +81,13 @@ def _find_ffmpeg() -> str | None:
         pattern = "C:/Users/*/AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg*/**/bin/ffmpeg.EXE"
         matches = _glob.glob(pattern, recursive=True)
         return matches[0] if matches else None
-    # Linux / macOS common install locations
-    for candidate in ("/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/opt/homebrew/bin/ffmpeg"):
+    # Linux / macOS common install locations + ripcheck static build
+    for candidate in (
+        "/usr/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/opt/homebrew/bin/ffmpeg",
+        str(Path.home() / ".cache/ripcheck/ffstatic/ffmpeg"),
+    ):
         if Path(candidate).exists():
             return candidate
     return None
