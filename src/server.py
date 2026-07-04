@@ -9,6 +9,7 @@ Android session lifecycle:
     POST /api/v1/chunks/upload             upload chunk (metadata must include run_id + camera_id)
     POST /api/v1/sessions/{run_id}/end     end → concat + dvc push in background
     GET  /api/v1/sessions/{run_id}         poll status
+    GET  /api/v1/sessions                  list recent sessions (newest first)
 
 Chunks are stored per session + camera to avoid seq-number collisions:
     store/chunks/{run_id}/{camera_id}/{chunk_id}.mp4
@@ -252,6 +253,11 @@ class SessionRegistry:
         with self._lock:
             return self._sessions.get(run_id)
 
+    def list_sessions(self, limit: int = 20) -> list[GameSession]:
+        with self._lock:
+            sessions = list(self._sessions.values())
+        return sorted(sessions, key=lambda s: s.created_at, reverse=True)[:limit]
+
     def _require(self, run_id: str) -> GameSession:
         session = self._sessions.get(run_id)
         if session is None:
@@ -384,6 +390,11 @@ def create_app(cfg: ServerConfig) -> FastAPI:
     app = FastAPI(title="basketball-cv game server", lifespan=_lifespan)
 
     # --- Session endpoints ---------------------------------------------------
+
+    @app.get("/api/v1/sessions")
+    async def list_sessions(limit: int = 20) -> list[dict[str, Any]]:
+        """List recent sessions, newest first — backs the Android app's status page."""
+        return [s.to_dict() for s in registry.list_sessions(limit=limit)]
 
     @app.post("/api/v1/sessions", status_code=201)
     async def create_session(body: dict[str, Any]) -> dict[str, Any]:

@@ -14,6 +14,7 @@ import io
 import json
 import shutil
 import zlib
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -178,6 +179,51 @@ class TestSessionGet:
 
     def test_unknown_returns_404(self, client):
         assert client.get("/api/v1/sessions/ghost").status_code == 404
+
+
+class TestSessionList:
+    def test_empty_when_no_sessions(self, client):
+        resp = client.get("/api/v1/sessions")
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    def test_lists_created_sessions(self, client):
+        with patch("src.server.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2020, 1, 1)
+            run_id_a = client.post("/api/v1/sessions", json={"camera_id": "cam_a", "team": "A"}).json()["run_id"]
+        with patch("src.server.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2020, 1, 2)
+            run_id_b = client.post("/api/v1/sessions", json={"camera_id": "cam_b", "team": "B"}).json()["run_id"]
+        resp = client.get("/api/v1/sessions")
+        assert resp.status_code == 200
+        run_ids = {s["run_id"] for s in resp.json()}
+        assert run_ids == {run_id_a, run_id_b}
+
+    def test_sorted_newest_first(self, client):
+        # created_at has second resolution — pin distinct timestamps via datetime.now()
+        # rather than relying on real wall-clock gaps between the two creation calls.
+        with patch("src.server.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2020, 1, 1)
+            run_id_older = client.post("/api/v1/sessions", json={"camera_id": "cam_a", "team": "A"}).json()["run_id"]
+        with patch("src.server.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2020, 1, 2)
+            run_id_newer = client.post("/api/v1/sessions", json={"camera_id": "cam_b", "team": "B"}).json()["run_id"]
+
+        resp = client.get("/api/v1/sessions")
+        run_ids_in_order = [s["run_id"] for s in resp.json()]
+        assert run_ids_in_order[0] == run_id_newer
+        assert run_ids_in_order[-1] == run_id_older
+
+    def test_limit_respected(self, client):
+        # run_id has second resolution, so distinct timestamps are needed to avoid
+        # same-second sessions colliding on the same run_id (a separate, pre-existing
+        # behavior, not something this test is meant to exercise).
+        for i in range(3):
+            with patch("src.server.datetime") as mock_dt:
+                mock_dt.now.return_value = datetime(2020, 1, 1 + i)
+                client.post("/api/v1/sessions", json={"camera_id": f"cam_{i}", "team": "A"})
+        resp = client.get("/api/v1/sessions", params={"limit": 2})
+        assert len(resp.json()) == 2
 
 
 # ---------------------------------------------------------------------------
