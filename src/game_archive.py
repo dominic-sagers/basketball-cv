@@ -19,6 +19,8 @@ import shutil
 import subprocess
 import sys
 import threading
+from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -32,6 +34,40 @@ OUTPUT_DIR = Path("store/output")
 # with "Unable to acquire lock" instead of queueing.
 _push_lock = threading.Lock()
 _push_proc: subprocess.Popen | None = None
+
+# Push state, exposed via get_push_status() (and the server's /api/v1/push-status
+# route) so the archive-server operator/app can tell whether data reaching DONE
+# locally has *also* made it to the remote — the push itself is only visible in
+# server logs otherwise, which is invisible from the Android side.
+PUSH_NEVER_RUN = "NEVER_RUN"
+PUSH_PENDING = "PENDING"
+PUSH_PUSHING = "PUSHING"
+PUSH_PUSHED = "PUSHED"
+PUSH_FAILED = "FAILED"
+
+
+@dataclass
+class PushStatus:
+    state: str = PUSH_NEVER_RUN
+    started_at: str | None = None
+    finished_at: str | None = None
+    error: str | None = None
+
+
+_push_status = PushStatus()
+
+
+def get_push_status() -> dict[str, str | None]:
+    """
+    Current state of the background dvc push to the remote.
+
+    This is global, not per-session — dvc push covers the whole local DVC
+    cache in one shot, not one session's chunks at a time. A session reaching
+    DONE only guarantees its data is safe in the local cache on this machine;
+    this is how to check whether that data has also reached the remote.
+    """
+    with _push_lock:
+        return asdict(_push_status)
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +147,9 @@ def dvc_push_background(project_root: str = ".") -> None:
             logger.info("dvc push already in progress — this session's data will ride along.")
             return
         logger.info("Starting background dvc push to remote …")
+        _push_status.state = PUSH_PUSHING
+        _push_status.started_at = datetime.now().isoformat()
+        _push_status.error = None
         _push_proc = subprocess.Popen(
             [dvc, "push"], cwd=project_root,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -121,6 +160,18 @@ def dvc_push_background(project_root: str = ".") -> None:
     with _push_lock:
         if _push_proc is proc:
             _push_proc = None
+        if proc.returncode == 0:
+            _push_status.state = PUSH_PUSHED
+            _push_status.finished_at = datetime.now().isoformat()
+        elif proc.returncode < 0:
+            # Killed by _kill_in_flight_push() to let a newer dvc add proceed — a
+            # fresh push covering this session's data starts right after that add,
+            # so this isn't a failure, just queued behind the add.
+            _push_status.state = PUSH_PENDING
+        else:
+            _push_status.state = PUSH_FAILED
+            _push_status.finished_at = datetime.now().isoformat()
+            _push_status.error = (out or "")[-600:]
 
     if proc.returncode == 0:
         logger.info("Background dvc push complete.")

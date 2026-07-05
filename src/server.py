@@ -10,6 +10,7 @@ Android session lifecycle:
     POST /api/v1/sessions/{run_id}/end     end → concat + dvc push in background
     GET  /api/v1/sessions/{run_id}         poll status
     GET  /api/v1/sessions                  list recent sessions (newest first)
+    GET  /api/v1/push-status               background dvc push status (global, not per-session)
 
 Chunks are stored per session + camera to avoid seq-number collisions:
     store/chunks/{run_id}/{camera_id}/{chunk_id}.mp4
@@ -48,7 +49,7 @@ from fastapi.responses import JSONResponse
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.game_archive import dvc_add_local, dvc_push_background
+from src.game_archive import dvc_add_local, dvc_push_background, get_push_status
 
 logger = logging.getLogger(__name__)
 
@@ -395,6 +396,17 @@ def create_app(cfg: ServerConfig) -> FastAPI:
     async def list_sessions(limit: int = 20) -> list[dict[str, Any]]:
         """List recent sessions, newest first — backs the Android app's status page."""
         return [s.to_dict() for s in registry.list_sessions(limit=limit)]
+
+    @app.get("/api/v1/push-status")
+    async def push_status() -> dict[str, Any]:
+        """
+        Status of the background dvc push to the remote (Dominic's tailnet machine).
+
+        Global, not per-session — a session reaching DONE only means its data is
+        safe in the local DVC cache on this machine; this reflects whether that
+        cache has also been pushed on to the remote.
+        """
+        return get_push_status()
 
     @app.post("/api/v1/sessions", status_code=201)
     async def create_session(body: dict[str, Any]) -> dict[str, Any]:

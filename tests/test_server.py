@@ -380,6 +380,25 @@ class TestTwoCameraE2E:
 
 
 # ---------------------------------------------------------------------------
+# Push status
+# ---------------------------------------------------------------------------
+
+class TestPushStatus:
+    def test_reflects_current_status(self, client):
+        fake = {"state": "PUSHING", "started_at": "2026-07-05T12:00:00", "finished_at": None, "error": None}
+        with patch("src.server.get_push_status", return_value=fake):
+            resp = client.get("/api/v1/push-status")
+        assert resp.status_code == 200
+        assert resp.json() == fake
+
+    def test_never_run_by_default(self, client):
+        fake = {"state": "NEVER_RUN", "started_at": None, "finished_at": None, "error": None}
+        with patch("src.server.get_push_status", return_value=fake):
+            resp = client.get("/api/v1/push-status")
+        assert resp.json()["state"] == "NEVER_RUN"
+
+
+# ---------------------------------------------------------------------------
 # Health check
 # ---------------------------------------------------------------------------
 
