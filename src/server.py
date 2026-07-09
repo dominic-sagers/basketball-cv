@@ -65,7 +65,7 @@ class ServerConfig:
     games_root: Path = Path("store/output/games")
     # End-of-session drain: how long to keep accepting other cameras' upload
     # backlog before archiving (basketball-cv#15).
-    drain_quiet_seconds: float = 20.0    # camera with no reported total counts as drained after this much upload silence
+    drain_quiet_seconds: float = 20.0    # camera that never reported a total (crashed device) counts as drained after this much upload silence
     drain_timeout_seconds: float = 900.0 # hard cap — archive whatever arrived by then
     drain_poll_seconds: float = 2.0      # how often the drain watcher re-checks
 
@@ -110,9 +110,11 @@ class CameraRecord:
     team: str
     joined_at: str
     chunks: list[str] = field(default_factory=list)
-    # Total segments the device says it captured — when known, "drained" means
-    # the server has received exactly that many; when None, drained falls back
-    # to a quiet-period heuristic.
+    # Total segments the device says it captured (sent with its end request) —
+    # when known, "drained" means the server has received exactly that many.
+    # None means the device never got to report (it crashed or lost its
+    # connection for good); the quiet-period heuristic covers that camera so
+    # one dead device can't stall the archive until the drain timeout.
     reported_total: int | None = None
     # time.monotonic() of the last received chunk; transient, not persisted.
     last_chunk_at: float | None = None
@@ -236,13 +238,7 @@ class SessionRegistry:
         logger.info("Camera %s (team %s) joined session %s", camera_id, team, run_id)
         return session
 
-    def add_chunk(
-        self,
-        run_id: str,
-        camera_id: str,
-        chunk_path: str,
-        reported_total: int | None = None,
-    ) -> None:
+    def add_chunk(self, run_id: str, camera_id: str, chunk_path: str) -> None:
         with self._lock:
             session = self._require(run_id)
             if session.state not in (RECORDING, DRAINING):
@@ -257,8 +253,6 @@ class SessionRegistry:
             cam = session.cameras[camera_id]
             cam.chunks.append(chunk_path)
             cam.last_chunk_at = time.monotonic()
-            if reported_total is not None:
-                cam.reported_total = reported_total
         session.persist(self._games_root)
 
     def end(
@@ -600,11 +594,6 @@ def create_app(cfg: ServerConfig) -> FastAPI:
         chunk_id = str(header.get("chunk_id") or "").strip()
         run_id = str(header.get("run_id") or "").strip()
         camera_id = str(header.get("camera_id") or "").strip()
-        try:
-            raw_total = header.get("captured_count")
-            reported_total = int(raw_total) if raw_total is not None else None
-        except (TypeError, ValueError):
-            raise HTTPException(400, "metadata.captured_count must be an integer")
 
         if not chunk_id:
             raise HTTPException(400, "metadata.chunk_id is required")
@@ -636,7 +625,7 @@ def create_app(cfg: ServerConfig) -> FastAPI:
                     f"Checksum mismatch for {chunk_id}: expected {app_checksum}, got {actual}",
                 )
 
-        registry.add_chunk(run_id, camera_id, str(chunk_path), reported_total=reported_total)
+        registry.add_chunk(run_id, camera_id, str(chunk_path))
 
         logger.info(
             "Chunk received: %s  session=%s cam=%s  %.1f MB",

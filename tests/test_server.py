@@ -456,7 +456,7 @@ class TestDrain:
             client.post(f"/api/v1/sessions/{run_id}/end", json={"camera_id": "cam_a", "captured_count": 5})
             _wait_for_state(client, run_id, DONE)
 
-    def test_quiet_fallback_drains_without_reported_counts(self, tmp_path, tiny_mp4):
+    def test_quiet_fallback_drains_camera_that_never_reported(self, tmp_path, tiny_mp4):
         cfg = ServerConfig(
             host="127.0.0.1", port=8000,
             chunks_root=tmp_path / "chunks", games_root=tmp_path / "games",
@@ -468,7 +468,9 @@ class TestDrain:
         with patch("src.server._concat", return_value=True), \
              patch("src.server.dvc_add_local", return_value=True), \
              patch("src.server.dvc_push_background"):
-            # Old client: no captured_count anywhere — quiet period finishes it.
+            # Device died before reporting its captured_count (end arrived with no
+            # body) — the quiet period must finish the drain rather than stalling
+            # until the hard timeout.
             resp = client.post(f"/api/v1/sessions/{run_id}/end")
             assert resp.status_code == 202
             _wait_for_state(client, run_id, DONE)
