@@ -7,7 +7,7 @@ Android session lifecycle:
     POST /api/v1/sessions                  create (cam A: camera_id + team)
     POST /api/v1/sessions/{run_id}/join    join (cam B: camera_id + team)
     POST /api/v1/chunks/upload             upload chunk (metadata must include run_id + camera_id)
-    POST /api/v1/sessions/{run_id}/end     end → concat + dvc push in background
+    POST /api/v1/sessions/{run_id}/end     end → DRAINING (uploads still accepted) → concat + dvc push
     GET  /api/v1/sessions/{run_id}         poll status
     GET  /api/v1/sessions                  list recent sessions (newest first)
     GET  /api/v1/push-status               background dvc push status (global, not per-session)
@@ -63,6 +63,11 @@ class ServerConfig:
     port: int = 8000
     chunks_root: Path = Path("store/chunks")
     games_root: Path = Path("store/output/games")
+    # End-of-session drain: how long to keep accepting other cameras' upload
+    # backlog before archiving (basketball-cv#15).
+    drain_quiet_seconds: float = 20.0    # camera that never reported a total (crashed device) counts as drained after this much upload silence
+    drain_timeout_seconds: float = 900.0 # hard cap — archive whatever arrived by then
+    drain_poll_seconds: float = 2.0      # how often the drain watcher re-checks
 
     @classmethod
     def from_yaml(cls, path: str = "config.yaml") -> "ServerConfig":
@@ -78,6 +83,9 @@ class ServerConfig:
             port=int(recv.get("port", 8000)),
             chunks_root=Path(recv.get("storage_root", "store/chunks")),
             games_root=Path("store/output/games"),
+            drain_quiet_seconds=float(recv.get("drain_quiet_seconds", 20.0)),
+            drain_timeout_seconds=float(recv.get("drain_timeout_seconds", 900.0)),
+            drain_poll_seconds=float(recv.get("drain_poll_seconds", 2.0)),
         )
 
 
@@ -87,9 +95,13 @@ class ServerConfig:
 
 WAITING = "WAITING"
 RECORDING = "RECORDING"
+DRAINING = "DRAINING"
 ARCHIVING = "ARCHIVING"
 DONE = "DONE"
 FAILED = "FAILED"
+
+# States a client should read as "the session is over — stop capturing".
+ENDED_STATES = (DRAINING, ARCHIVING, DONE, FAILED)
 
 
 @dataclass
@@ -98,6 +110,14 @@ class CameraRecord:
     team: str
     joined_at: str
     chunks: list[str] = field(default_factory=list)
+    # Total segments the device says it captured (sent with its end request) —
+    # when known, "drained" means the server has received exactly that many.
+    # None means the device never got to report (it crashed or lost its
+    # connection for good); the quiet-period heuristic covers that camera so
+    # one dead device can't stall the archive until the drain timeout.
+    reported_total: int | None = None
+    # time.monotonic() of the last received chunk; transient, not persisted.
+    last_chunk_at: float | None = None
 
 
 @dataclass
@@ -122,6 +142,7 @@ class GameSession:
                     "team": c.team,
                     "joined_at": c.joined_at,
                     "chunk_count": len(c.chunks),
+                    "reported_total": c.reported_total,
                 }
                 for cid, c in self.cameras.items()
             },
@@ -151,6 +172,7 @@ class GameSession:
                 team=cam.get("team", ""),
                 joined_at=cam.get("joined_at", ""),
                 chunks=chunk_lists.get(cid, []),
+                reported_total=cam.get("reported_total"),
             )
         return session
 
@@ -171,7 +193,7 @@ class SessionRegistry:
         for f in self._games_root.glob("*/session.json"):
             try:
                 s = GameSession.load(f)
-                if s.state in (WAITING, RECORDING, ARCHIVING):
+                if s.state in (WAITING, RECORDING, DRAINING, ARCHIVING):
                     s.state = FAILED
                     s.error = "Server restarted while session was active"
                     s.persist(self._games_root)
@@ -219,25 +241,75 @@ class SessionRegistry:
     def add_chunk(self, run_id: str, camera_id: str, chunk_path: str) -> None:
         with self._lock:
             session = self._require(run_id)
-            if session.state != RECORDING:
-                raise HTTPException(400, f"Session {run_id} is {session.state}, not RECORDING")
+            if session.state not in (RECORDING, DRAINING):
+                raise HTTPException(
+                    400, f"Session {run_id} is {session.state}, not accepting uploads"
+                )
             if camera_id not in session.cameras:
                 raise HTTPException(
                     400,
                     f"Camera {camera_id} not in session {run_id} — call /join first",
                 )
-            session.cameras[camera_id].chunks.append(chunk_path)
+            cam = session.cameras[camera_id]
+            cam.chunks.append(chunk_path)
+            cam.last_chunk_at = time.monotonic()
         session.persist(self._games_root)
 
-    def end(self, run_id: str) -> GameSession:
+    def end(
+        self,
+        run_id: str,
+        camera_id: str | None = None,
+        captured_count: int | None = None,
+    ) -> tuple[GameSession, bool]:
+        """
+        Mark the session ended. Returns (session, newly_ended).
+
+        Ending an already-ended session is not an error — the joiner device may
+        legitimately call end after the creator did (android#21); it gets the
+        current state back, and its captured_count is still recorded so the
+        drain watcher knows when that camera's backlog is fully received.
+        """
         with self._lock:
             session = self._require(run_id)
-            if session.state != RECORDING:
-                raise HTTPException(400, f"Session {run_id} is {session.state}, not RECORDING")
+            if camera_id and captured_count is not None and camera_id in session.cameras:
+                session.cameras[camera_id].reported_total = captured_count
+            newly_ended = session.state == RECORDING
+            if newly_ended:
+                session.state = DRAINING
+                session.ended_at = datetime.now().isoformat()
+        session.persist(self._games_root)
+        return session, newly_ended
+
+    def begin_archiving(self, run_id: str) -> GameSession | None:
+        """DRAINING → ARCHIVING; returns None if the session is no longer draining."""
+        with self._lock:
+            session = self._sessions.get(run_id)
+            if session is None or session.state != DRAINING:
+                return None
             session.state = ARCHIVING
-            session.ended_at = datetime.now().isoformat()
         session.persist(self._games_root)
         return session
+
+    def all_drained(self, run_id: str, quiet_seconds: float, drain_start: float) -> bool:
+        """
+        True when every camera's upload backlog appears fully received: a camera
+        with a client-reported total is drained once that many chunks arrived;
+        one without is drained after quiet_seconds with no new chunk.
+        """
+        with self._lock:
+            session = self._sessions.get(run_id)
+            if session is None:
+                return True
+            now = time.monotonic()
+            for cam in session.cameras.values():
+                if cam.reported_total is not None:
+                    if len(cam.chunks) < cam.reported_total:
+                        return False
+                else:
+                    last_activity = cam.last_chunk_at if cam.last_chunk_at is not None else drain_start
+                    if now - last_activity < quiet_seconds:
+                        return False
+        return True
 
     def set_state(self, run_id: str, state: str, error: str | None = None) -> None:
         with self._lock:
@@ -325,6 +397,34 @@ def _crc32_hex(path: Path) -> str:
 # The background dvc_push_background() has its own single-flight guard and does
 # not need this lock — see game_archive.py.
 _dvc_lock = threading.Lock()
+
+
+def _drain_then_archive(session: GameSession, cfg: ServerConfig, registry: SessionRegistry) -> None:
+    """
+    Background thread: hold the session in DRAINING until every camera's upload
+    backlog has been received (or the drain times out), then archive.
+
+    Ending a session used to archive immediately, discarding whatever the other
+    cameras hadn't uploaded yet — the normal game-night flow lost the joiner's
+    tail footage (basketball-cv#15).
+    """
+    drain_start = time.monotonic()
+    deadline = drain_start + cfg.drain_timeout_seconds
+    while time.monotonic() < deadline:
+        if registry.all_drained(session.run_id, cfg.drain_quiet_seconds, drain_start):
+            logger.info("[%s] All cameras drained after %.1fs", session.run_id, time.monotonic() - drain_start)
+            break
+        time.sleep(cfg.drain_poll_seconds)
+    else:
+        logger.warning(
+            "[%s] Drain timed out after %.0fs — archiving what was received",
+            session.run_id, cfg.drain_timeout_seconds,
+        )
+
+    if registry.begin_archiving(session.run_id) is None:
+        logger.warning("[%s] No longer DRAINING — skipping archive", session.run_id)
+        return
+    _run_archive(session, cfg, registry)
 
 
 def _run_archive(session: GameSession, cfg: ServerConfig, registry: SessionRegistry) -> None:
@@ -433,17 +533,35 @@ def create_app(cfg: ServerConfig) -> FastAPI:
         return session.to_dict()
 
     @app.post("/api/v1/sessions/{run_id}/end", status_code=202)
-    async def end_session(run_id: str) -> dict[str, Any]:
-        """End the session. Triggers concat + DVC push in the background."""
-        session = registry.end(run_id)
-        t = threading.Thread(
-            target=_run_archive,
-            args=(session, cfg, registry),
-            name=f"archive-{run_id}",
-            daemon=False,
-        )
-        t.start()
-        return {"run_id": run_id, "state": session.state, "message": "Archiving started"}
+    async def end_session(run_id: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+        """
+        End the session: drain remaining uploads from all cameras, then concat +
+        DVC push in the background.
+
+        Optional body: {camera_id, captured_count} — the calling device's total
+        captured-segment count, so the drain knows when that camera is complete.
+        Ending an already-ended session returns its current state (not an error).
+        """
+        camera_id = str((body or {}).get("camera_id") or "").strip() or None
+        try:
+            raw_count = (body or {}).get("captured_count")
+            captured_count = int(raw_count) if raw_count is not None else None
+        except (TypeError, ValueError):
+            raise HTTPException(400, "captured_count must be an integer")
+
+        session, newly_ended = registry.end(run_id, camera_id, captured_count)
+        if newly_ended:
+            t = threading.Thread(
+                target=_drain_then_archive,
+                args=(session, cfg, registry),
+                name=f"archive-{run_id}",
+                daemon=False,
+            )
+            t.start()
+            message = "Draining uploads, then archiving"
+        else:
+            message = f"Session already ended ({session.state})"
+        return {"run_id": run_id, "state": session.state, "message": message}
 
     @app.get("/api/v1/sessions/{run_id}")
     async def get_session(run_id: str) -> JSONResponse:
@@ -533,7 +651,7 @@ def create_app(cfg: ServerConfig) -> FastAPI:
             "port": cfg.port,
             "sessions": {
                 state: sum(1 for s in sessions.values() if s.state == state)
-                for state in (RECORDING, ARCHIVING, DONE, FAILED)
+                for state in (RECORDING, DRAINING, ARCHIVING, DONE, FAILED)
             },
         }
 
