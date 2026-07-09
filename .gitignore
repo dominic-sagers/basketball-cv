@@ -33,4 +33,7 @@ Thumbs.db
 # Docker volumes
 volumes/
 
+# Secrets
+.env
+
 CLAUDE.md
