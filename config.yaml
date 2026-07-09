@@ -172,6 +172,14 @@ receiver:
   healthcheck_workers: 2       # background threads draining the validation queue
   status_cache_ttl_seconds: 3600 # how long to keep healthcheck results in memory
 
+  # End-of-session drain: after POST /end the session sits in DRAINING and keeps
+  # accepting uploads until every camera's backlog has arrived, so a joiner's
+  # queued chunks aren't discarded when the creator ends the session.
+  drain_quiet_seconds: 20      # camera with no reported captured_count counts as
+                               # drained after this much upload silence
+  drain_timeout_seconds: 900   # hard cap — archive whatever has arrived by then
+  drain_poll_seconds: 2        # how often the drain watcher re-checks
+
 # ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------

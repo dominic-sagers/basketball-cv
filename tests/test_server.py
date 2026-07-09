@@ -13,6 +13,7 @@ from __future__ import annotations
 import io
 import json
 import shutil
+import time
 import zlib
 from datetime import datetime
 from pathlib import Path
@@ -24,10 +25,12 @@ from fastapi.testclient import TestClient
 from src.server import (
     ARCHIVING,
     DONE,
+    DRAINING,
     FAILED,
     RECORDING,
     GameSession,
     ServerConfig,
+    SessionRegistry,
     _crc32_hex,
     create_app,
 )
@@ -68,11 +71,17 @@ class _SyncThread:
 
 @pytest.fixture
 def cfg(tmp_path) -> ServerConfig:
+    # drain_quiet_seconds=0 makes every camera without a reported captured_count
+    # count as drained immediately, so tests that end a session synchronously
+    # (via _SyncThread) archive right away like they did pre-drain.
     return ServerConfig(
         host="127.0.0.1",
         port=8000,
         chunks_root=tmp_path / "chunks",
         games_root=tmp_path / "games",
+        drain_quiet_seconds=0.0,
+        drain_timeout_seconds=5.0,
+        drain_poll_seconds=0.01,
     )
 
 
@@ -304,10 +313,13 @@ class TestStateGuards:
             client.post(f"/api/v1/sessions/{run_id}/end")
         return run_id
 
-    def test_end_nonrecording_session_400(self, client):
+    def test_end_already_ended_returns_current_state(self, client):
+        # A joiner ending after the creator did must not 400 — that wedged its
+        # UI on "Archiving footage…" (android#21). It gets the state instead.
         run_id = self._ended_session(client)
         resp = client.post(f"/api/v1/sessions/{run_id}/end")
-        assert resp.status_code == 400
+        assert resp.status_code == 202
+        assert resp.json()["state"] == DONE
 
     def test_join_done_session_400(self, client):
         run_id = self._ended_session(client)
@@ -318,6 +330,160 @@ class TestStateGuards:
         run_id = self._ended_session(client)
         resp = _upload_chunk(client, run_id, "cam_a", "cam_a_chunk_0000", tiny_mp4)
         assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# End-of-session drain (basketball-cv#15)
+# ---------------------------------------------------------------------------
+
+def _wait_for_state(client: TestClient, run_id: str, want: str, timeout: float = 5.0) -> dict:
+    """Poll GET /sessions/{run_id} until the session reaches `want` (or fail)."""
+    deadline = time.monotonic() + timeout
+    body: dict = {}
+    while time.monotonic() < deadline:
+        body = client.get(f"/api/v1/sessions/{run_id}").json()
+        if body["state"] == want:
+            return body
+        time.sleep(0.02)
+    raise AssertionError(f"Session {run_id} never reached {want}; last state: {body.get('state')}")
+
+
+class TestDrain:
+    """Drain runs on real background threads here (no _SyncThread), with dvc and
+    concat patched out, so uploads can land while the session is DRAINING."""
+
+    @pytest.fixture
+    def drain_cfg(self, tmp_path) -> ServerConfig:
+        # Long quiet period: only reported captured_counts (or the timeout)
+        # can finish the drain, so DRAINING is observable mid-test.
+        return ServerConfig(
+            host="127.0.0.1",
+            port=8000,
+            chunks_root=tmp_path / "chunks",
+            games_root=tmp_path / "games",
+            drain_quiet_seconds=30.0,
+            drain_timeout_seconds=5.0,
+            drain_poll_seconds=0.02,
+        )
+
+    @pytest.fixture
+    def drain_client(self, drain_cfg) -> TestClient:
+        return TestClient(create_app(drain_cfg))
+
+    def test_end_drains_backlog_before_archiving(self, drain_client, tiny_mp4):
+        """The two-cam e2e failure mode: creator ends while the joiner still has
+        chunks queued — those uploads must be accepted and make the archive."""
+        client = drain_client
+        run_id = client.post("/api/v1/sessions", json={"camera_id": "cam_a", "team": "A"}).json()["run_id"]
+        client.post(f"/api/v1/sessions/{run_id}/join", json={"camera_id": "cam_b", "team": "B"})
+        _upload_chunk(client, run_id, "cam_a", "cam_a_chunk_0000", tiny_mp4)
+        _upload_chunk(client, run_id, "cam_b", "cam_b_chunk_0000", tiny_mp4)
+
+        concat_calls: list[list[str]] = []
+
+        def fake_concat(chunks: list[str], output: str) -> bool:
+            concat_calls.append(list(chunks))
+            return True
+
+        with patch("src.server._concat", side_effect=fake_concat), \
+             patch("src.server.dvc_add_local", return_value=True), \
+             patch("src.server.dvc_push_background"):
+            # Creator ends, reporting totals: cam_a done at 1, cam_b captured 2
+            # but only uploaded 1 so far.
+            resp = client.post(
+                f"/api/v1/sessions/{run_id}/end",
+                json={"camera_id": "cam_a", "captured_count": 1},
+            )
+            assert resp.status_code == 202
+            assert resp.json()["state"] == DRAINING
+
+            # Joiner's own end reports its total — legal while DRAINING.
+            resp = client.post(
+                f"/api/v1/sessions/{run_id}/end",
+                json={"camera_id": "cam_b", "captured_count": 2},
+            )
+            assert resp.status_code == 202
+
+            # The straggler chunk is still accepted while DRAINING…
+            resp = _upload_chunk(client, run_id, "cam_b", "cam_b_chunk_0001", tiny_mp4)
+            assert resp.status_code == 202
+
+            # …and once counts match, the session archives.
+            _wait_for_state(client, run_id, DONE)
+
+        cam_b_chunks = next(c for c in concat_calls if any("cam_b" in p for p in c))
+        assert len(cam_b_chunks) == 2
+
+    def test_upload_after_archiving_still_rejected(self, drain_client, tiny_mp4):
+        client = drain_client
+        run_id = client.post("/api/v1/sessions", json={"camera_id": "cam_a", "team": "A"}).json()["run_id"]
+        _upload_chunk(client, run_id, "cam_a", "cam_a_chunk_0000", tiny_mp4)
+        with patch("src.server._concat", return_value=True), \
+             patch("src.server.dvc_add_local", return_value=True), \
+             patch("src.server.dvc_push_background"):
+            client.post(f"/api/v1/sessions/{run_id}/end", json={"camera_id": "cam_a", "captured_count": 1})
+            _wait_for_state(client, run_id, DONE)
+        resp = _upload_chunk(client, run_id, "cam_a", "cam_a_chunk_0001", tiny_mp4)
+        assert resp.status_code == 400
+
+    def test_join_while_draining_rejected(self, drain_client, tiny_mp4):
+        client = drain_client
+        run_id = client.post("/api/v1/sessions", json={"camera_id": "cam_a", "team": "A"}).json()["run_id"]
+        with patch("src.server._concat", return_value=True), \
+             patch("src.server.dvc_add_local", return_value=True), \
+             patch("src.server.dvc_push_background"):
+            # captured_count of 1 with nothing uploaded keeps it DRAINING.
+            client.post(f"/api/v1/sessions/{run_id}/end", json={"camera_id": "cam_a", "captured_count": 1})
+            resp = client.post(f"/api/v1/sessions/{run_id}/join", json={"camera_id": "cam_c", "team": "B"})
+            assert resp.status_code == 400
+            # Drain the session so its non-daemon watcher thread exits promptly.
+            _upload_chunk(client, run_id, "cam_a", "cam_a_chunk_0000", tiny_mp4)
+            _wait_for_state(client, run_id, DONE)
+
+    def test_drain_timeout_archives_partial(self, tmp_path, tiny_mp4):
+        cfg = ServerConfig(
+            host="127.0.0.1", port=8000,
+            chunks_root=tmp_path / "chunks", games_root=tmp_path / "games",
+            drain_quiet_seconds=30.0, drain_timeout_seconds=0.2, drain_poll_seconds=0.02,
+        )
+        client = TestClient(create_app(cfg))
+        run_id = client.post("/api/v1/sessions", json={"camera_id": "cam_a", "team": "A"}).json()["run_id"]
+        _upload_chunk(client, run_id, "cam_a", "cam_a_chunk_0000", tiny_mp4)
+        with patch("src.server._concat", return_value=True), \
+             patch("src.server.dvc_add_local", return_value=True), \
+             patch("src.server.dvc_push_background"):
+            # Reported total never arrives — the timeout must still archive.
+            client.post(f"/api/v1/sessions/{run_id}/end", json={"camera_id": "cam_a", "captured_count": 5})
+            _wait_for_state(client, run_id, DONE)
+
+    def test_quiet_fallback_drains_without_reported_counts(self, tmp_path, tiny_mp4):
+        cfg = ServerConfig(
+            host="127.0.0.1", port=8000,
+            chunks_root=tmp_path / "chunks", games_root=tmp_path / "games",
+            drain_quiet_seconds=0.1, drain_timeout_seconds=5.0, drain_poll_seconds=0.02,
+        )
+        client = TestClient(create_app(cfg))
+        run_id = client.post("/api/v1/sessions", json={"camera_id": "cam_a", "team": "A"}).json()["run_id"]
+        _upload_chunk(client, run_id, "cam_a", "cam_a_chunk_0000", tiny_mp4)
+        with patch("src.server._concat", return_value=True), \
+             patch("src.server.dvc_add_local", return_value=True), \
+             patch("src.server.dvc_push_background"):
+            # Old client: no captured_count anywhere — quiet period finishes it.
+            resp = client.post(f"/api/v1/sessions/{run_id}/end")
+            assert resp.status_code == 202
+            _wait_for_state(client, run_id, DONE)
+
+    def test_restore_marks_draining_session_failed(self, tmp_path):
+        games_root = tmp_path / "games"
+        session = GameSession(
+            run_id="2026-01-01_000000", state=DRAINING,
+            created_at="2026-01-01T00:00:00",
+        )
+        session.persist(games_root)
+        registry = SessionRegistry(games_root)
+        restored = registry.get("2026-01-01_000000")
+        assert restored is not None
+        assert restored.state == FAILED
 
 
 # ---------------------------------------------------------------------------
