@@ -24,10 +24,12 @@ from fastapi.testclient import TestClient
 
 from src.server import (
     ARCHIVING,
+    CANCELLED,
     DONE,
     DRAINING,
     FAILED,
     RECORDING,
+    WAITING,
     GameSession,
     ServerConfig,
     SessionRegistry,
@@ -126,12 +128,13 @@ def _upload_chunk(
 # ---------------------------------------------------------------------------
 
 class TestSessionCreate:
-    def test_creates_with_run_id(self, client):
+    def test_creates_in_waiting_state(self, client):
+        # WAITING, not RECORDING: no camera has confirmed positioning yet.
         resp = client.post("/api/v1/sessions", json={"camera_id": "cam_a", "team": "A"})
         assert resp.status_code == 201
         body = resp.json()
         assert "run_id" in body
-        assert body["state"] == RECORDING
+        assert body["state"] == WAITING
 
     def test_missing_camera_id_400(self, client):
         resp = client.post("/api/v1/sessions", json={"team": "A"})
@@ -148,21 +151,64 @@ class TestSessionCreate:
         assert session_file.exists()
         data = json.loads(session_file.read_text())
         assert data["run_id"] == run_id
-        assert data["state"] == RECORDING
+        assert data["state"] == WAITING
         assert "cam_a" in data["cameras"]
+
+
+class TestSessionStart:
+    def _create(self, client) -> str:
+        return client.post("/api/v1/sessions", json={"camera_id": "cam_a", "team": "A"}).json()["run_id"]
+
+    def test_start_transitions_to_recording(self, client):
+        run_id = self._create(client)
+        resp = client.post(f"/api/v1/sessions/{run_id}/start", json={"camera_id": "cam_a"})
+        assert resp.status_code == 200
+        assert resp.json()["state"] == RECORDING
+
+    def test_start_is_idempotent_for_second_device(self, client):
+        # Creator and joiner each confirm positioning independently — whichever calls
+        # /start second must not error.
+        run_id = self._create(client)
+        client.post(f"/api/v1/sessions/{run_id}/join", json={"camera_id": "cam_b", "team": "B"})
+        client.post(f"/api/v1/sessions/{run_id}/start", json={"camera_id": "cam_a"})
+        resp = client.post(f"/api/v1/sessions/{run_id}/start", json={"camera_id": "cam_b"})
+        assert resp.status_code == 200
+        assert resp.json()["state"] == RECORDING
+
+    def test_start_unknown_session_404(self, client):
+        resp = client.post("/api/v1/sessions/no-such-id/start", json={"camera_id": "cam_a"})
+        assert resp.status_code == 404
+
+    def test_start_after_done_400(self, client):
+        run_id = self._create(client)
+        client.post(f"/api/v1/sessions/{run_id}/start", json={"camera_id": "cam_a"})
+        with patch("src.server.dvc_add_local", return_value=True), \
+             patch("src.server.dvc_push_background"), \
+             patch("src.server.threading.Thread", _SyncThread):
+            client.post(f"/api/v1/sessions/{run_id}/end")
+        resp = client.post(f"/api/v1/sessions/{run_id}/start", json={"camera_id": "cam_a"})
+        assert resp.status_code == 400
 
 
 class TestSessionJoin:
     def _create(self, client) -> str:
         return client.post("/api/v1/sessions", json={"camera_id": "cam_a", "team": "A"}).json()["run_id"]
 
-    def test_join_registers_second_camera(self, client):
+    def test_join_registers_second_camera_while_waiting(self, client):
+        # The second device must be able to join and start positioning in parallel,
+        # before the creator has confirmed its own positioning (still WAITING).
         run_id = self._create(client)
         resp = client.post(f"/api/v1/sessions/{run_id}/join", json={"camera_id": "cam_b", "team": "B"})
         assert resp.status_code == 200
         body = resp.json()
         assert "cam_a" in body["cameras"]
         assert "cam_b" in body["cameras"]
+
+    def test_join_after_creator_started_recording(self, client):
+        run_id = self._create(client)
+        client.post(f"/api/v1/sessions/{run_id}/start", json={"camera_id": "cam_a"})
+        resp = client.post(f"/api/v1/sessions/{run_id}/join", json={"camera_id": "cam_b", "team": "B"})
+        assert resp.status_code == 200
 
     def test_duplicate_camera_400(self, client):
         run_id = self._create(client)
@@ -180,8 +226,15 @@ class TestSessionJoin:
 
 
 class TestSessionGet:
+    def test_waiting_returns_202(self, client):
+        run_id = client.post("/api/v1/sessions", json={"camera_id": "cam_a", "team": "A"}).json()["run_id"]
+        resp = client.get(f"/api/v1/sessions/{run_id}")
+        assert resp.status_code == 202
+        assert resp.json()["state"] == WAITING
+
     def test_recording_returns_202(self, client):
         run_id = client.post("/api/v1/sessions", json={"camera_id": "cam_a", "team": "A"}).json()["run_id"]
+        client.post(f"/api/v1/sessions/{run_id}/start", json={"camera_id": "cam_a"})
         resp = client.get(f"/api/v1/sessions/{run_id}")
         assert resp.status_code == 202
         assert resp.json()["state"] == RECORDING
@@ -241,7 +294,16 @@ class TestSessionList:
 
 class TestChunkUpload:
     def _session(self, client) -> str:
-        return client.post("/api/v1/sessions", json={"camera_id": "cam_a", "team": "A"}).json()["run_id"]
+        run_id = client.post("/api/v1/sessions", json={"camera_id": "cam_a", "team": "A"}).json()["run_id"]
+        client.post(f"/api/v1/sessions/{run_id}/start", json={"camera_id": "cam_a"})
+        return run_id
+
+    def test_upload_while_waiting_rejected(self, client, tiny_mp4):
+        # Uploads must not be accepted before a device confirms recording via /start —
+        # mirrors the app not capturing anything until Continue on the Positioning screen.
+        run_id = client.post("/api/v1/sessions", json={"camera_id": "cam_a", "team": "A"}).json()["run_id"]
+        resp = _upload_chunk(client, run_id, "cam_a", "cam_a_chunk_0000", tiny_mp4)
+        assert resp.status_code == 400
 
     def test_valid_chunk_accepted(self, client, tiny_mp4):
         run_id = self._session(client)
@@ -307,6 +369,7 @@ class TestChunkUpload:
 class TestStateGuards:
     def _ended_session(self, client) -> str:
         run_id = client.post("/api/v1/sessions", json={"camera_id": "cam_a", "team": "A"}).json()["run_id"]
+        client.post(f"/api/v1/sessions/{run_id}/start", json={"camera_id": "cam_a"})
         with patch("src.server.dvc_add_local", return_value=True), \
              patch("src.server.dvc_push_background"), \
              patch("src.server.threading.Thread", _SyncThread):
@@ -329,6 +392,34 @@ class TestStateGuards:
     def test_upload_to_done_session_400(self, client, tiny_mp4):
         run_id = self._ended_session(client)
         resp = _upload_chunk(client, run_id, "cam_a", "cam_a_chunk_0000", tiny_mp4)
+        assert resp.status_code == 400
+
+    def test_end_while_waiting_cancels(self, client):
+        # Backing out of Positioning before Continue — no camera ever started, so this
+        # goes straight to CANCELLED rather than draining/archiving anything.
+        run_id = client.post("/api/v1/sessions", json={"camera_id": "cam_a", "team": "A"}).json()["run_id"]
+        resp = client.post(f"/api/v1/sessions/{run_id}/end")
+        assert resp.status_code == 202
+        assert resp.json()["state"] == CANCELLED
+
+    def test_end_cancelled_is_idempotent(self, client):
+        run_id = client.post("/api/v1/sessions", json={"camera_id": "cam_a", "team": "A"}).json()["run_id"]
+        client.post(f"/api/v1/sessions/{run_id}/end")
+        resp = client.post(f"/api/v1/sessions/{run_id}/end")
+        assert resp.status_code == 202
+        assert resp.json()["state"] == CANCELLED
+
+    def test_get_cancelled_returns_200(self, client):
+        run_id = client.post("/api/v1/sessions", json={"camera_id": "cam_a", "team": "A"}).json()["run_id"]
+        client.post(f"/api/v1/sessions/{run_id}/end")
+        resp = client.get(f"/api/v1/sessions/{run_id}")
+        assert resp.status_code == 200
+        assert resp.json()["state"] == CANCELLED
+
+    def test_join_cancelled_session_400(self, client):
+        run_id = client.post("/api/v1/sessions", json={"camera_id": "cam_a", "team": "A"}).json()["run_id"]
+        client.post(f"/api/v1/sessions/{run_id}/end")
+        resp = client.post(f"/api/v1/sessions/{run_id}/join", json={"camera_id": "cam_b", "team": "B"})
         assert resp.status_code == 400
 
 
@@ -376,6 +467,7 @@ class TestDrain:
         client = drain_client
         run_id = client.post("/api/v1/sessions", json={"camera_id": "cam_a", "team": "A"}).json()["run_id"]
         client.post(f"/api/v1/sessions/{run_id}/join", json={"camera_id": "cam_b", "team": "B"})
+        client.post(f"/api/v1/sessions/{run_id}/start", json={"camera_id": "cam_a"})
         _upload_chunk(client, run_id, "cam_a", "cam_a_chunk_0000", tiny_mp4)
         _upload_chunk(client, run_id, "cam_b", "cam_b_chunk_0000", tiny_mp4)
 
@@ -417,6 +509,7 @@ class TestDrain:
     def test_upload_after_archiving_still_rejected(self, drain_client, tiny_mp4):
         client = drain_client
         run_id = client.post("/api/v1/sessions", json={"camera_id": "cam_a", "team": "A"}).json()["run_id"]
+        client.post(f"/api/v1/sessions/{run_id}/start", json={"camera_id": "cam_a"})
         _upload_chunk(client, run_id, "cam_a", "cam_a_chunk_0000", tiny_mp4)
         with patch("src.server._concat", return_value=True), \
              patch("src.server.dvc_add_local", return_value=True), \
@@ -429,6 +522,7 @@ class TestDrain:
     def test_join_while_draining_rejected(self, drain_client, tiny_mp4):
         client = drain_client
         run_id = client.post("/api/v1/sessions", json={"camera_id": "cam_a", "team": "A"}).json()["run_id"]
+        client.post(f"/api/v1/sessions/{run_id}/start", json={"camera_id": "cam_a"})
         with patch("src.server._concat", return_value=True), \
              patch("src.server.dvc_add_local", return_value=True), \
              patch("src.server.dvc_push_background"):
@@ -448,6 +542,7 @@ class TestDrain:
         )
         client = TestClient(create_app(cfg))
         run_id = client.post("/api/v1/sessions", json={"camera_id": "cam_a", "team": "A"}).json()["run_id"]
+        client.post(f"/api/v1/sessions/{run_id}/start", json={"camera_id": "cam_a"})
         _upload_chunk(client, run_id, "cam_a", "cam_a_chunk_0000", tiny_mp4)
         with patch("src.server._concat", return_value=True), \
              patch("src.server.dvc_add_local", return_value=True), \
@@ -464,6 +559,7 @@ class TestDrain:
         )
         client = TestClient(create_app(cfg))
         run_id = client.post("/api/v1/sessions", json={"camera_id": "cam_a", "team": "A"}).json()["run_id"]
+        client.post(f"/api/v1/sessions/{run_id}/start", json={"camera_id": "cam_a"})
         _upload_chunk(client, run_id, "cam_a", "cam_a_chunk_0000", tiny_mp4)
         with patch("src.server._concat", return_value=True), \
              patch("src.server.dvc_add_local", return_value=True), \
@@ -484,6 +580,20 @@ class TestDrain:
         session.persist(games_root)
         registry = SessionRegistry(games_root)
         restored = registry.get("2026-01-01_000000")
+        assert restored is not None
+        assert restored.state == FAILED
+
+    def test_restore_marks_waiting_session_failed(self, tmp_path):
+        # A device killed mid-positioning (never reached /start) needs recovery too,
+        # same as one killed mid-recording — it shouldn't sit as WAITING forever.
+        games_root = tmp_path / "games"
+        session = GameSession(
+            run_id="2026-01-01_000001", state=WAITING,
+            created_at="2026-01-01T00:00:00",
+        )
+        session.persist(games_root)
+        registry = SessionRegistry(games_root)
+        restored = registry.get("2026-01-01_000001")
         assert restored is not None
         assert restored.state == FAILED
 
@@ -508,6 +618,7 @@ class TestTwoCameraE2E:
 
         # Join (cam_b)
         client.post(f"/api/v1/sessions/{run_id}/join", json={"camera_id": "cam_b", "team": "B"})
+        client.post(f"/api/v1/sessions/{run_id}/start", json={"camera_id": "cam_a"})
 
         # Upload 3 chunks per camera
         for i in range(3):
@@ -534,6 +645,7 @@ class TestTwoCameraE2E:
 
     def test_session_json_reflects_done_state(self, client, cfg, make_mp4):
         run_id = client.post("/api/v1/sessions", json={"camera_id": "cam_a", "team": "A"}).json()["run_id"]
+        client.post(f"/api/v1/sessions/{run_id}/start", json={"camera_id": "cam_a"})
         video = make_mp4(n_frames=5, name="chunk.mp4").read_bytes()
         _upload_chunk(client, run_id, "cam_a", "cam_a_chunk_0000", video)
 

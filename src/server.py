@@ -4,13 +4,19 @@ server.py — standalone FastAPI backend for game archiving.
 No Qt, no torch, no GPU. Designed to run on the NUC production box.
 
 Android session lifecycle:
-    POST /api/v1/sessions                  create (cam A: camera_id + team)
-    POST /api/v1/sessions/{run_id}/join    join (cam B: camera_id + team)
+    POST /api/v1/sessions                  create (cam A: camera_id + team) → WAITING
+    POST /api/v1/sessions/{run_id}/join    join (cam B: camera_id + team) — WAITING or RECORDING
+    POST /api/v1/sessions/{run_id}/start   confirm positioning → RECORDING (uploads now accepted)
     POST /api/v1/chunks/upload             upload chunk (metadata must include run_id + camera_id)
-    POST /api/v1/sessions/{run_id}/end     end → DRAINING (uploads still accepted) → concat + dvc push
+    POST /api/v1/sessions/{run_id}/end     end → DRAINING (uploads still accepted) → concat + dvc push;
+                                            ending while still WAITING → CANCELLED (nothing to archive)
     GET  /api/v1/sessions/{run_id}         poll status
     GET  /api/v1/sessions                  list recent sessions (newest first)
     GET  /api/v1/push-status               background dvc push status (global, not per-session)
+
+A session sits in WAITING from creation until a device confirms it has finished positioning
+the camera and started capturing — mirrors the Android app's own Positioning screen, so a
+session backed out of before Continue never gets reported as "RECORDING" with zero footage.
 
 Chunks are stored per session + camera to avoid seq-number collisions:
     store/chunks/{run_id}/{camera_id}/{chunk_id}.mp4
@@ -93,15 +99,16 @@ class ServerConfig:
 # Session state machine
 # ---------------------------------------------------------------------------
 
-WAITING = "WAITING"
-RECORDING = "RECORDING"
+WAITING = "WAITING"      # created (or joined), but no camera has confirmed positioning yet
+RECORDING = "RECORDING"  # at least one camera has confirmed positioning and is capturing
 DRAINING = "DRAINING"
 ARCHIVING = "ARCHIVING"
 DONE = "DONE"
 FAILED = "FAILED"
+CANCELLED = "CANCELLED"  # ended while still WAITING — no camera ever started, nothing to archive
 
 # States a client should read as "the session is over — stop capturing".
-ENDED_STATES = (DRAINING, ARCHIVING, DONE, FAILED)
+ENDED_STATES = (DRAINING, ARCHIVING, DONE, FAILED, CANCELLED)
 
 
 @dataclass
@@ -193,6 +200,7 @@ class SessionRegistry:
         for f in self._games_root.glob("*/session.json"):
             try:
                 s = GameSession.load(f)
+                # WAITING included: interrupted mid-positioning needs recovery too.
                 if s.state in (WAITING, RECORDING, DRAINING, ARCHIVING):
                     s.state = FAILED
                     s.error = "Server restarted while session was active"
@@ -206,7 +214,7 @@ class SessionRegistry:
         run_id = datetime.now().strftime("%Y-%m-%d_%H%M%S")
         session = GameSession(
             run_id=run_id,
-            state=RECORDING,
+            state=WAITING,
             created_at=datetime.now().isoformat(),
             cameras={
                 camera_id: CameraRecord(
@@ -225,8 +233,11 @@ class SessionRegistry:
     def join(self, run_id: str, camera_id: str, team: str) -> GameSession:
         with self._lock:
             session = self._require(run_id)
-            if session.state != RECORDING:
-                raise HTTPException(400, f"Session {run_id} is {session.state}, expected RECORDING")
+            # WAITING: the creator hasn't confirmed positioning yet — the second device can
+            # still join and position in parallel. RECORDING: the creator already started;
+            # a later joiner just starts its own capture immediately after positioning.
+            if session.state not in (WAITING, RECORDING):
+                raise HTTPException(400, f"Session {run_id} is {session.state}, expected WAITING or RECORDING")
             if camera_id in session.cameras:
                 raise HTTPException(400, f"Camera {camera_id} already in session {run_id}")
             session.cameras[camera_id] = CameraRecord(
@@ -236,6 +247,26 @@ class SessionRegistry:
             )
         session.persist(self._games_root)
         logger.info("Camera %s (team %s) joined session %s", camera_id, team, run_id)
+        return session
+
+    def begin_recording(self, run_id: str, camera_id: str | None = None) -> GameSession:
+        """
+        WAITING → RECORDING: a device has confirmed positioning and started its camera.
+
+        Whichever device calls this first (creator or joiner — each decides independently
+        when to leave its own positioning screen) unblocks uploads for the whole session, so
+        the other device's first chunk is never rejected regardless of which one continues
+        first. Idempotent: a second caller (the other device) just gets the current state
+        back, same as end() tolerates a second caller.
+        """
+        with self._lock:
+            session = self._require(run_id)
+            if session.state == WAITING:
+                session.state = RECORDING
+            elif session.state != RECORDING:
+                raise HTTPException(400, f"Session {run_id} is {session.state}, cannot start recording")
+        session.persist(self._games_root)
+        logger.info("Session %s recording confirmed by %s", run_id, camera_id or "?")
         return session
 
     def add_chunk(self, run_id: str, camera_id: str, chunk_path: str) -> None:
@@ -262,21 +293,32 @@ class SessionRegistry:
         captured_count: int | None = None,
     ) -> tuple[GameSession, bool]:
         """
-        Mark the session ended. Returns (session, newly_ended).
+        Mark the session ended. Returns (session, newly_ended) — newly_ended is True only
+        for the RECORDING → DRAINING transition (the caller uses it to decide whether to
+        kick off the drain-then-archive background thread).
 
         Ending an already-ended session is not an error — the joiner device may
         legitimately call end after the creator did (android#21); it gets the
         current state back, and its captured_count is still recorded so the
         drain watcher knows when that camera's backlog is fully received.
+
+        Ending a WAITING session (positioning was cancelled before any camera started —
+        confirmPositioning() was never reached) goes straight to CANCELLED: no camera ever
+        ran, so there's nothing to drain or archive.
         """
         with self._lock:
             session = self._require(run_id)
             if camera_id and captured_count is not None and camera_id in session.cameras:
                 session.cameras[camera_id].reported_total = captured_count
-            newly_ended = session.state == RECORDING
-            if newly_ended:
-                session.state = DRAINING
+            if session.state == WAITING:
+                session.state = CANCELLED
                 session.ended_at = datetime.now().isoformat()
+                newly_ended = False
+            else:
+                newly_ended = session.state == RECORDING
+                if newly_ended:
+                    session.state = DRAINING
+                    session.ended_at = datetime.now().isoformat()
         session.persist(self._games_root)
         return session, newly_ended
 
@@ -532,6 +574,17 @@ def create_app(cfg: ServerConfig) -> FastAPI:
         session = registry.join(run_id, camera_id, team)
         return session.to_dict()
 
+    @app.post("/api/v1/sessions/{run_id}/start", status_code=200)
+    async def start_recording(run_id: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+        """
+        Confirm positioning is done and this device's camera has started capturing.
+        WAITING → RECORDING; a no-op if another device already made this call. Optional
+        body: {camera_id} — informational, logged only.
+        """
+        camera_id = str((body or {}).get("camera_id") or "").strip() or None
+        session = registry.begin_recording(run_id, camera_id)
+        return session.to_dict()
+
     @app.post("/api/v1/sessions/{run_id}/end", status_code=202)
     async def end_session(run_id: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         """
@@ -559,6 +612,8 @@ def create_app(cfg: ServerConfig) -> FastAPI:
             )
             t.start()
             message = "Draining uploads, then archiving"
+        elif session.state == CANCELLED:
+            message = "Session cancelled before recording started"
         else:
             message = f"Session already ended ({session.state})"
         return {"run_id": run_id, "state": session.state, "message": message}
@@ -569,7 +624,7 @@ def create_app(cfg: ServerConfig) -> FastAPI:
         session = registry.get(run_id)
         if session is None:
             raise HTTPException(404, f"Session {run_id} not found")
-        code = 200 if session.state in (DONE, FAILED) else 202
+        code = 200 if session.state in (DONE, FAILED, CANCELLED) else 202
         return JSONResponse(status_code=code, content=session.to_dict())
 
     # --- Chunk upload --------------------------------------------------------
@@ -651,7 +706,7 @@ def create_app(cfg: ServerConfig) -> FastAPI:
             "port": cfg.port,
             "sessions": {
                 state: sum(1 for s in sessions.values() if s.state == state)
-                for state in (RECORDING, DRAINING, ARCHIVING, DONE, FAILED)
+                for state in (WAITING, RECORDING, DRAINING, ARCHIVING, DONE, FAILED, CANCELLED)
             },
         }
 
