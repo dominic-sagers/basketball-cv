@@ -74,6 +74,9 @@ class ServerConfig:
     drain_quiet_seconds: float = 20.0    # camera that never reported a total (crashed device) counts as drained after this much upload silence
     drain_timeout_seconds: float = 900.0 # hard cap — archive whatever arrived by then
     drain_poll_seconds: float = 2.0      # how often the drain watcher re-checks
+    # Test environments run without a mounted .dvc/.git — set false there so archiving
+    # completes as DONE locally instead of failing on a missing DVC repo.
+    dvc_enabled: bool = True
 
     @classmethod
     def from_yaml(cls, path: str = "config.yaml") -> "ServerConfig":
@@ -92,6 +95,7 @@ class ServerConfig:
             drain_quiet_seconds=float(recv.get("drain_quiet_seconds", 20.0)),
             drain_timeout_seconds=float(recv.get("drain_timeout_seconds", 900.0)),
             drain_poll_seconds=float(recv.get("drain_poll_seconds", 2.0)),
+            dvc_enabled=bool(recv.get("dvc_enabled", True)),
         )
 
 
@@ -496,6 +500,11 @@ def _run_archive(session: GameSession, cfg: ServerConfig, registry: SessionRegis
     if not all_ok:
         registry.set_state(session.run_id, FAILED, error="Concat failed for one or more cameras")
         logger.error("Session %s archive failed → FAILED", session.run_id)
+        return
+
+    if not cfg.dvc_enabled:
+        registry.set_state(session.run_id, DONE)
+        logger.info("Session %s archived → DONE (local, DVC disabled)", session.run_id)
         return
 
     with _dvc_lock:

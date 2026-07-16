@@ -8,6 +8,10 @@ __pycache__/
 # /store entry below is managed by DVC (dvc add store)
 /store
 
+# Test-environment server storage (docker-compose.test.yml) — never DVC-tracked,
+# kept out of /store on purpose so test recordings can't mix into real game data
+/test-store
+
 # Stale top-level dirs (moved to store/ — safe to remove if empty)
 weights/
 output/
