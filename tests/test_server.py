@@ -424,6 +424,42 @@ class TestStateGuards:
 
 
 # ---------------------------------------------------------------------------
+# Test-environment archiving (receiver.dvc_enabled: false — see config.test.yaml)
+# ---------------------------------------------------------------------------
+
+class TestArchiveDvcDisabled:
+    @pytest.fixture
+    def dvc_disabled_cfg(self, tmp_path) -> ServerConfig:
+        return ServerConfig(
+            host="127.0.0.1",
+            port=8000,
+            chunks_root=tmp_path / "chunks",
+            games_root=tmp_path / "games",
+            drain_quiet_seconds=0.0,
+            drain_timeout_seconds=5.0,
+            drain_poll_seconds=0.01,
+            dvc_enabled=False,
+        )
+
+    @pytest.fixture
+    def dvc_disabled_client(self, dvc_disabled_cfg) -> TestClient:
+        return TestClient(create_app(dvc_disabled_cfg))
+
+    def test_end_reaches_done_without_calling_dvc(self, dvc_disabled_client):
+        client = dvc_disabled_client
+        run_id = client.post("/api/v1/sessions", json={"camera_id": "cam_a", "team": "A"}).json()["run_id"]
+        client.post(f"/api/v1/sessions/{run_id}/start", json={"camera_id": "cam_a"})
+        with patch("src.server.dvc_add_local") as mock_add, \
+             patch("src.server.dvc_push_background") as mock_push, \
+             patch("src.server.threading.Thread", _SyncThread):
+            resp = client.post(f"/api/v1/sessions/{run_id}/end")
+        assert resp.status_code == 202
+        assert resp.json()["state"] == DONE
+        mock_add.assert_not_called()
+        mock_push.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # End-of-session drain (basketball-cv#15)
 # ---------------------------------------------------------------------------
 

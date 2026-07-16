@@ -1,0 +1,29 @@
+# Test-environment server — isolated from prod (docker-compose.yml) on purpose.
+# Separate file so a routine `docker compose up -d` for prod never starts this
+# service, and vice versa. Bring it up explicitly:
+#   docker compose -f docker-compose.test.yml up -d --build
+#
+# Same image/code as prod — only runtime config differs: separate port, separate
+# storage tree (never mixes with real game footage in ./store), and no .dvc/.git/
+# .ssh mounts (config.test.yaml sets receiver.dvc_enabled: false, so archiving
+# never attempts a DVC operation here).
+services:
+  server-test:
+    build: .
+    image: basketball-cv-server:latest
+    container_name: basketball-cv-server-test
+    restart: unless-stopped
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./test-store:/app/store              # isolated storage — safe to wipe, never DVC-tracked
+      - ./config.test.yaml:/app/config.yaml:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
