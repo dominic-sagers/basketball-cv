@@ -363,6 +363,65 @@ class TestChunkUpload:
 
 
 # ---------------------------------------------------------------------------
+# Device metrics
+# ---------------------------------------------------------------------------
+
+class TestMetricsUpload:
+    def _session(self, client) -> str:
+        # Deliberately doesn't call /start, unlike TestChunkUpload._session — metrics
+        # upload isn't state-gated (test_valid_metrics_accepted below proves it's
+        # accepted in WAITING, where chunk upload would be rejected with 400).
+        return client.post("/api/v1/sessions", json={"camera_id": "cam_a", "team": "A"}).json()["run_id"]
+
+    def _upload(self, client, run_id: str, camera_id: str, body: bytes):
+        return client.post(
+            f"/api/v1/sessions/{run_id}/metrics",
+            data={"camera_id": camera_id},
+            files={"file": ("metrics.jsonl", io.BytesIO(body), "application/x-ndjson")},
+        )
+
+    def test_valid_metrics_accepted(self, client):
+        run_id = self._session(client)
+        body = b'{"ts_ms": 1, "battery_pct": 90}\n{"ts_ms": 2, "battery_pct": 89}\n'
+        resp = self._upload(client, run_id, "cam_a", body)
+        assert resp.status_code == 202
+        data = resp.json()
+        assert data["status"] == "received"
+        assert data["run_id"] == run_id
+        assert data["camera_id"] == "cam_a"
+        assert data["bytes"] == len(body)
+
+    def test_metrics_file_written_to_correct_path(self, client, cfg):
+        run_id = self._session(client)
+        body = b'{"ts_ms": 1}\n'
+        self._upload(client, run_id, "cam_a", body)
+        expected = cfg.games_root / run_id / "metrics_cam_a.jsonl"
+        assert expected.exists()
+        assert expected.read_bytes() == body
+
+    def test_unknown_session_rejected(self, client):
+        resp = self._upload(client, "no-session", "cam_a", b"{}")
+        assert resp.status_code == 404
+
+    def test_blank_camera_id_rejected(self, client):
+        # A literal empty string gets dropped entirely by multipart encoding (→ FastAPI's
+        # own 422 for a missing required Form field) — whitespace-only reaches our
+        # explicit .strip() check instead, which is what this test is for.
+        run_id = self._session(client)
+        resp = client.post(
+            f"/api/v1/sessions/{run_id}/metrics",
+            data={"camera_id": "   "},
+            files={"file": ("metrics.jsonl", io.BytesIO(b"{}"), "application/x-ndjson")},
+        )
+        assert resp.status_code == 400
+
+    def test_path_traversal_rejected(self, client):
+        run_id = self._session(client)
+        resp = self._upload(client, run_id, "../evil", b"{}")
+        assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
 # State guards
 # ---------------------------------------------------------------------------
 

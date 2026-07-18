@@ -8,6 +8,7 @@ Android session lifecycle:
     POST /api/v1/sessions/{run_id}/join    join (cam B: camera_id + team) — WAITING or RECORDING
     POST /api/v1/sessions/{run_id}/start   confirm positioning → RECORDING (uploads now accepted)
     POST /api/v1/chunks/upload             upload chunk (metadata must include run_id + camera_id)
+    POST /api/v1/sessions/{run_id}/metrics upload one camera's device-health log (JSONL, any session state)
     POST /api/v1/sessions/{run_id}/end     end → DRAINING (uploads still accepted) → concat + dvc push;
                                             ending while still WAITING → CANCELLED (nothing to archive)
     GET  /api/v1/sessions/{run_id}         poll status
@@ -702,6 +703,51 @@ def create_app(cfg: ServerConfig) -> FastAPI:
             "camera_id": camera_id,
             "bytes": bytes_written,
             "timestamp_received_ms": int(time.time() * 1000),
+        }
+
+    # --- Device metrics --------------------------------------------------------
+
+    @app.post("/api/v1/sessions/{run_id}/metrics", status_code=202)
+    async def upload_metrics(
+        run_id: str,
+        camera_id: str = Form(...),
+        file: UploadFile = File(...),
+    ) -> dict[str, Any]:
+        """
+        Receive one camera's device-health log for this session: a JSONL file of
+        periodic battery/thermal/CPU samples taken by the Android app for the
+        duration of the recording. Purely diagnostic — never gates session state,
+        and accepted regardless of state as long as the session exists (unlike chunk
+        upload, this isn't part of the drain-count bookkeeping). Stored alongside the
+        session's archived footage so a phone's health over a game can be checked
+        without touching the device.
+        """
+        if registry.get(run_id) is None:
+            raise HTTPException(404, f"Session {run_id} not found")
+        camera_id = camera_id.strip()
+        if not camera_id:
+            raise HTTPException(400, "camera_id is required")
+        if "/" in camera_id or ".." in camera_id:
+            raise HTTPException(400, "camera_id contains illegal characters")
+
+        out_dir = cfg.games_root / run_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+        dest = out_dir / f"metrics_{camera_id}.jsonl"
+
+        bytes_written = 0
+        with dest.open("wb") as f:
+            while buf := await file.read(1 << 20):
+                f.write(buf)
+                bytes_written += len(buf)
+
+        logger.info(
+            "Metrics received: session=%s cam=%s %d bytes", run_id, camera_id, bytes_written,
+        )
+        return {
+            "status": "received",
+            "run_id": run_id,
+            "camera_id": camera_id,
+            "bytes": bytes_written,
         }
 
     # --- Health --------------------------------------------------------------
